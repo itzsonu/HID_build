@@ -132,3 +132,5 @@ npm run build
 Enrollment requires `consent: true`, detects one face, and stores only a 128-value normalized SFace embedding plus user ID and timestamps. The original JPEG is not stored. Explicit API consent does not establish legal compliance or prove a user's identity. Embeddings are sensitive biometric data: this prototype's SQLite database is local and unencrypted, and the API has no caller authentication, authorization, retention policy, or per-user deletion endpoint. Stop the backend and remove the local database file to remove all enrollments.
 
 Identity verification and liveness are independent. `VERIFIED` does not mean `LIVE`. This prototype has no individual student/staff role permissions, authenticated kiosk identity, or physical door-controller connection. A step-up result requests another approved verification method; it is not an access grant. Do not rely on this prototype for security-sensitive decisions or expose it to untrusted clients.
+#   H I D _ b u i l d  
+ 
