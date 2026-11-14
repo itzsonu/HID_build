@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+.venv*/
+venv/
+.pytest_cache/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# AWS / credentials
+.aws/
+*.pem
+*.key
+credentials
+
+# Biometric / local media
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.webp
+*.mp4
+*.mov
+
+# OS/editor
+.DS_Store
+Thumbs.db
+node_modules/
+dist/
+backend/data/
