@@ -202,18 +202,13 @@ class MovementAnalyzer:
                 last_valid_frame_index,
             )
         if movement_detected and consistency >= self.consistency_threshold:
-            direction_name = (
-                "leftward"
-                if challenge is LivenessChallenge.MOVE_LEFT
-                else "rightward"
-            )
             return self._result(
-                LivenessStatus.LIVE,
+                LivenessStatus.UNCERTAIN,
                 confidence,
                 True,
                 len(centers_x),
                 total_frames,
-                f"Requested {direction_name} movement met the experimental heuristic; this is not proof of liveness.",
+                "Requested movement was observed, but movement alone cannot distinguish a live person from a video replay; additional approved verification is required.",
                 last_valid_frame_index,
             )
         return self._result(

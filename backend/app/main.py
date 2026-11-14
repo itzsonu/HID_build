@@ -1,3 +1,6 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,11 +10,27 @@ from app.api.routes import access, auth, face, health, liveness
 from app.core.config import settings
 from app.schemas.face_detection import ImageTooLargeError
 from app.schemas.liveness import LivenessPayloadTooLargeError
+from app.services.face_recognition import (
+    FaceRecognitionUnavailableError,
+    face_embedding_service,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    try:
+        face_embedding_service.warm_up()
+    except FaceRecognitionUnavailableError as exc:
+        logger.warning("Face model warm-up failed; identity checks will fail closed: %s", exc)
+    yield
 
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="Backend foundation for the HID face liveness and identity verification system.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

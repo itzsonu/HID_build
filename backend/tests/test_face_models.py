@@ -21,6 +21,7 @@ def blank_jpeg() -> bytes:
 def test_actual_yunet_and_sface_models_load_and_reject_blank_jpeg() -> None:
     assert SFACE_MODEL_PATH.is_file()
     service = SFaceEmbeddingService()
+    service.warm_up()
 
     with pytest.raises(NoFaceDetectedError):
         service.extract_embedding(blank_jpeg())

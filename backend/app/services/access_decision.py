@@ -26,6 +26,11 @@ def decide_access(
             AccessDecision.DENY,
             "The face did not match the enrolled user; access is denied.",
         )
+    if identity_status is IdentityStatus.AMBIGUOUS:
+        return AccessPolicyResult(
+            AccessDecision.STEP_UP_VERIFICATION,
+            "More than one enrolled identity matched; an additional approved verification step is required.",
+        )
     if liveness_status is LivenessStatus.UNCERTAIN:
         return AccessPolicyResult(
             AccessDecision.STEP_UP_VERIFICATION,

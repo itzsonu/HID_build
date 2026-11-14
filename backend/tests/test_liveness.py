@@ -90,7 +90,7 @@ def test_challenge_generation_returns_random_supported_challenge(
     assert body["expires_in_seconds"] == 60
 
 
-def test_move_left_sequence_passes_experimental_heuristic(
+def test_move_left_sequence_is_not_treated_as_proof_of_liveness(
     monkeypatch, challenge_store
 ) -> None:
     issued = create_challenge(monkeypatch, LivenessChallenge.MOVE_LEFT)
@@ -104,17 +104,17 @@ def test_move_left_sequence_passes_experimental_heuristic(
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
-    assert body["liveness_status"] == "LIVE"
+    assert body["liveness_status"] == "UNCERTAIN"
     assert body["movement_detected"] is True
     assert body["valid_frame_count"] == FRAME_COUNT
     assert body["total_frame_count"] == FRAME_COUNT
     assert body["confidence"] > 0
-    assert "not proof of liveness" in body["message"]
+    assert "cannot distinguish a live person from a video replay" in body["message"]
     assert "identity_status" not in body
     assert "decision" not in body
 
 
-def test_move_right_sequence_passes_experimental_heuristic(
+def test_move_right_sequence_is_not_treated_as_proof_of_liveness(
     monkeypatch, challenge_store
 ) -> None:
     issued = create_challenge(monkeypatch, LivenessChallenge.MOVE_RIGHT)
@@ -126,7 +126,7 @@ def test_move_right_sequence_passes_experimental_heuristic(
     )
 
     assert response.status_code == 200
-    assert response.json()["liveness_status"] == "LIVE"
+    assert response.json()["liveness_status"] == "UNCERTAIN"
     assert response.json()["movement_detected"] is True
 
 

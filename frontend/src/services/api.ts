@@ -26,7 +26,7 @@ export interface LivenessResponse {
 }
 
 export type IdentityStatus = "VERIFIED" | "NOT_VERIFIED";
-export type AccessIdentityStatus = IdentityStatus | "NOT_CHECKED";
+export type AccessIdentityStatus = IdentityStatus | "NOT_CHECKED" | "AMBIGUOUS";
 export type AccessDecision = "ALLOW" | "STEP_UP_VERIFICATION" | "DENY";
 export type ScheduleStatus = "WITHIN_SCHEDULE" | "OUTSIDE_SCHEDULE" | "UNAVAILABLE";
 
@@ -39,6 +39,7 @@ export interface AccessDecisionResponse {
   schedule_status: ScheduleStatus;
   reason: string;
   identity_message: string;
+  matched_user_id: string | null;
   requires_step_up: boolean;
   movement_detected: boolean;
   valid_frame_count: number;
@@ -54,6 +55,27 @@ export interface FaceRegistrationResponse {
   success: boolean;
   registered: boolean;
   user_id: string;
+  processing_time_ms: number;
+  message: string;
+}
+
+export type EnrollmentPhotoStatus = "ACCEPTED" | "REJECTED" | "DUPLICATE";
+
+export interface EnrollmentPhotoResult {
+  photo_index: number;
+  status: EnrollmentPhotoStatus;
+  message: string;
+}
+
+export interface BatchFaceRegistrationResponse {
+  success: boolean;
+  registered: boolean;
+  updated: boolean;
+  user_id: string;
+  photo_results: EnrollmentPhotoResult[];
+  accepted_photo_count: number;
+  rejected_photo_count: number;
+  duplicate_photo_count: number;
   processing_time_ms: number;
   message: string;
 }
@@ -188,14 +210,13 @@ export function checkLiveness(
 }
 
 export function decideAccess(
-  userId: string,
   challengeId: string,
   frames: string[],
   signal: AbortSignal,
 ): Promise<AccessDecisionResponse> {
   return requestJson<AccessDecisionResponse>("/api/access/decision", {
     method: "POST",
-    body: { user_id: userId, challenge_id: challengeId, frames },
+    body: { challenge_id: challengeId, frames },
     signal,
     timeoutMs: 45_000,
   });
@@ -221,6 +242,24 @@ export function registerFace(
     method: "POST",
     body: { user_id: userId, consent, image_base64: imageBase64 },
     signal,
+  });
+}
+
+export function registerFacesBatch(
+  userId: string,
+  imagesBase64: string[],
+  consent: boolean,
+  signal?: AbortSignal,
+): Promise<BatchFaceRegistrationResponse> {
+  return requestJson<BatchFaceRegistrationResponse>("/api/auth/register/batch", {
+    method: "POST",
+    body: {
+      user_id: userId,
+      images_base64: imagesBase64,
+      consent,
+    },
+    signal,
+    timeoutMs: 60_000,
   });
 }
 

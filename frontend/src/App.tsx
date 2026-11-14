@@ -15,6 +15,12 @@ import {
 } from "./services/api";
 import { captureJpegFrame, validateFrameBatch } from "./frameCapture";
 import { screenChallengeLabel, screenDirectionForChallenge } from "./challengeDisplay";
+import BatchEnrollment from "./components/BatchEnrollment";
+import {
+  enrollmentForAttempt,
+  waitForEnrollment,
+  type EnrollmentOperation,
+} from "./enrollmentCoordination";
 import {
   loadOfflineEvents,
   recordOfflineStepUp,
@@ -22,7 +28,7 @@ import {
 } from "./offlineQueue";
 
 type ConnectionState = "checking" | "online" | "offline";
-type VerificationPhase = "idle" | "countdown" | "capturing" | "submitting";
+type VerificationPhase = "idle" | "countdown" | "capturing" | "waiting-enrollment" | "submitting";
 type DisplayStatus = AccessDecision | "ERROR";
 
 interface DisplayResult {
@@ -36,12 +42,15 @@ interface DisplayResult {
   validFrameCount?: number;
   totalFrameCount?: number;
   processingTimeMs?: number;
+  captureDurationMs?: number;
+  responseTimeMs?: number;
   message: string;
   identityMessage?: string;
+  matchedUserId?: string | null;
 }
 
 const FRAME_COUNT = 10;
-const FRAME_INTERVAL_MS = 260;
+const FRAME_INTERVAL_MS = 180;
 
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
@@ -99,6 +108,11 @@ function App() {
   const cameraRequestRef = useRef(0);
   const mountedRef = useRef(true);
   const offlineSyncInFlightRef = useRef(false);
+  const enrollmentGenerationRef = useRef(0);
+  const enrollmentRequestRef = useRef<EnrollmentOperation & {
+    resolve: (registered: boolean) => void;
+    settled: boolean;
+  } | null>(null);
 
   const [connection, setConnection] = useState<ConnectionState>("checking");
   const [healthMessage, setHealthMessage] = useState("Checking backend...");
@@ -108,13 +122,38 @@ function App() {
   const [phase, setPhase] = useState<VerificationPhase>("idle");
   const [isVerifying, setIsVerifying] = useState(false);
   const [challenge, setChallenge] = useState<ChallengeResponse | null>(null);
-  const [userId, setUserId] = useState("");
   const [frameProgress, setFrameProgress] = useState(0);
   const [countdown, setCountdown] = useState(0);
   const [result, setResult] = useState<DisplayResult | null>(null);
   const [offlineEventCount, setOfflineEventCount] = useState(
     () => loadOfflineEvents().length,
   );
+
+  const handleEnrollmentStarted = useCallback(() => {
+    if (enrollmentRequestRef.current && !enrollmentRequestRef.current.settled) {
+      return;
+    }
+    let resolveEnrollment!: (registered: boolean) => void;
+    const promise = new Promise<boolean>((resolve) => {
+      resolveEnrollment = resolve;
+    });
+    enrollmentGenerationRef.current += 1;
+    enrollmentRequestRef.current = {
+      promise,
+      resolve: resolveEnrollment,
+      generation: enrollmentGenerationRef.current,
+      settled: false,
+    };
+  }, []);
+
+  const handleEnrollmentFinished = useCallback((registered: boolean) => {
+    const pendingEnrollment = enrollmentRequestRef.current;
+    if (!pendingEnrollment || pendingEnrollment.settled) {
+      return;
+    }
+    pendingEnrollment.settled = true;
+    pendingEnrollment.resolve(registered);
+  }, []);
 
   const checkBackend = useCallback(async () => {
     setConnection("checking");
@@ -291,14 +330,6 @@ function App() {
   };
 
   const startVerification = async () => {
-    if (!userId.trim()) {
-      setResult({
-        status: "ERROR",
-        challenge: null,
-        message: "Enter the ID of an already enrolled user before requesting an access decision.",
-      });
-      return;
-    }
     const video = videoRef.current;
     if (!streamRef.current || !video) {
       setResult({
@@ -321,6 +352,11 @@ function App() {
     activeRunRef.current = runId;
     const controller = new AbortController();
     activeAbortRef.current = controller;
+    const enrollmentGenerationAtStart = enrollmentGenerationRef.current;
+    const enrollmentAtStart =
+      enrollmentRequestRef.current && !enrollmentRequestRef.current.settled
+        ? enrollmentRequestRef.current
+        : null;
     const ensureActive = () => {
       if (activeRunRef.current !== runId || controller.signal.aborted) {
         throw new DOMException("Verification cancelled.", "AbortError");
@@ -337,12 +373,14 @@ function App() {
     setCountdown(0);
 
     let issuedChallenge: ChallengeResponse | null = null;
+    let captureDurationMs: number | undefined;
     try {
+      const captureStartedAt = performance.now();
       issuedChallenge = await createChallenge(controller.signal);
       ensureActive();
       setChallenge(issuedChallenge);
       setPhase("countdown");
-      for (let value = 3; value > 0; value -= 1) {
+      for (let value = 2; value > 0; value -= 1) {
         setCountdown(value);
         await wait(1_000);
         ensureActive();
@@ -364,18 +402,37 @@ function App() {
       }
 
       ensureActive();
+      captureDurationMs = performance.now() - captureStartedAt;
       const frameError = validateFrameBatch(frames);
       if (frameError) {
         throw new Error(frameError);
       }
 
+      const pendingEnrollment = enrollmentForAttempt(
+        enrollmentGenerationAtStart,
+        enrollmentAtStart,
+        enrollmentRequestRef.current,
+      );
+      if (pendingEnrollment) {
+        setPhase("waiting-enrollment");
+        const enrollmentSucceeded = await waitForEnrollment(
+          pendingEnrollment.promise,
+          controller.signal,
+        );
+        ensureActive();
+        if (!enrollmentSucceeded) {
+          throw new Error("Reference-photo enrollment did not complete. No access decision was submitted.");
+        }
+      }
+
       setPhase("submitting");
+      const responseStartedAt = performance.now();
       const response = await decideAccess(
-        userId.trim(),
         issuedChallenge.challenge_id,
         frames,
         controller.signal,
       );
+      const responseTimeMs = performance.now() - responseStartedAt;
       ensureActive();
       setResult({
         status: response.decision,
@@ -388,8 +445,11 @@ function App() {
         validFrameCount: response.valid_frame_count,
         totalFrameCount: response.total_frame_count,
         processingTimeMs: response.processing_time_ms,
+        captureDurationMs,
+        responseTimeMs,
         message: response.reason,
         identityMessage: response.identity_message,
+        matchedUserId: response.matched_user_id,
       });
       setPhase("idle");
     } catch (error) {
@@ -399,6 +459,7 @@ function App() {
       setResult({
         status: "ERROR",
         challenge: issuedChallenge?.challenge ?? null,
+        captureDurationMs,
         message: verificationErrorMessage(error),
       });
       setPhase("idle");
@@ -426,266 +487,247 @@ function App() {
           ? "caution"
           : "";
 
+  const flowLabel = phase === "countdown"
+    ? `Get ready · ${countdown}s`
+    : phase === "capturing"
+      ? `Capturing frames · ${frameProgress}/${FRAME_COUNT}`
+      : phase === "waiting-enrollment"
+        ? "Waiting for reference enrollment…"
+      : phase === "submitting"
+        ? "Checking with backend…"
+        : result
+          ? "Attempt complete"
+          : "Ready to verify";
+
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="/" aria-label="HID liveness demo home">
-          <span className="brand-mark">H</span>
-          <span className="brand-name">HID <span>LAB</span></span>
+    <main className="app-shell stitch-shell">
+      <header className="stitch-header">
+        <a className="stitch-brand" href="/" aria-label="HID Lab home">
+          <span className="stitch-brand-mark" aria-hidden="true">H</span>
+          <span>
+            <span className="stitch-brand-name">HID LAB</span>
+            <span className="stitch-brand-caption">CAMPUS ACCESS VERIFICATION</span>
+          </span>
         </a>
-        <div className={`connection-pill ${connection}`} role="status">
-          <span className="connection-dot" />
-          <span>{connection === "online" ? "Backend connected" : connection === "checking" ? "Checking backend" : "Backend offline"}</span>
+        <div className="stitch-header-actions">
+          {offlineEventCount > 0 && (
+            <span className="stitch-queue" role="status">
+              {offlineEventCount} offline event{offlineEventCount === 1 ? "" : "s"} waiting
+            </span>
+          )}
+          <div className={`stitch-connection ${connection}`} role="status">
+            <span className="stitch-status-dot" />
+            {connection === "online" ? "Backend connected" : connection === "checking" ? "Checking backend" : "Backend offline"}
+          </div>
           <button
-            className="text-button connection-retry"
+            className="stitch-retry"
             type="button"
             onClick={() => void checkBackend()}
             disabled={connection === "checking"}
           >
-            {connection === "checking" ? "…" : "Retry"}
+            {connection === "checking" ? "Checking…" : "Retry"}
           </button>
         </div>
       </header>
 
-      <section className="intro">
-        <div>
-          <p className="eyebrow"><span className="eyebrow-line" /> PROTOTYPE · 01</p>
-          <h1>Movement <span>check.</span></h1>
-          <p className="intro-copy">
-            Complete a randomized movement prompt. The backend independently checks liveness,
-            enrolled identity, and the configured campus schedule before returning a decision.
+      <section className="stitch-intro">
+        <div className="stitch-intro-copy">
+          <div className="stitch-kicker"><span /> PROTOTYPE · 01</div>
+          <div className="stitch-title-row">
+            <h1>Movement check<span>.</span></h1>
+            <span className="stitch-prototype-tag">KIOSK DEMO</span>
+          </div>
+          <p>
+            Follow the one-time movement prompt. The backend checks the submitted frames,
+            matches the current face against enrolled templates, and checks the configured
+            campus schedule before returning a decision.
           </p>
-        </div>
-        <div className="intro-meta">
-          <span className="meta-label">API STATUS</span>
-          <span className={`meta-value ${connection}`}>{connection === "online" ? "OPERATIONAL" : connection === "checking" ? "CONNECTING" : "UNAVAILABLE"}</span>
-          <span className="meta-detail" title={configuredApiUrl}>{healthMessage}</span>
         </div>
       </section>
 
-      <section className="workspace" aria-label="Camera liveness verification">
-        <div className="camera-column">
-          <div className="section-heading">
-            <div>
-              <span className="step-index">01</span>
-              <h2>Camera preview</h2>
+      <BatchEnrollment
+        backendOnline={connection === "online"}
+        accessStream={stream}
+        onEnrollmentStarted={handleEnrollmentStarted}
+        onEnrollmentFinished={handleEnrollmentFinished}
+      />
+
+      <section className="stitch-workspace" aria-label="Camera liveness verification">
+        <section className="stitch-card stitch-camera-card">
+          <div className="stitch-card-heading stitch-camera-heading">
+            <div className="stitch-heading-title">
+              <span className="stitch-step">01</span>
+              <div>
+                <h2>Camera feed</h2>
+                <span className={`stitch-camera-state ${stream ? "active" : ""}`}>
+                  <span className="stitch-status-dot" /> {stream ? "CAMERA ON" : "CAMERA OFF"}
+                </span>
+              </div>
             </div>
-            <span className={`camera-state ${stream ? "active" : ""}`}>
-              <span className="state-dot" /> {stream ? "CAMERA ON" : "CAMERA OFF"}
-            </span>
+            <div className="stitch-camera-actions">
+              {!stream ? (
+                <button
+                  className="stitch-button stitch-button-primary"
+                  type="button"
+                  onClick={() => void startCamera()}
+                  disabled={cameraStarting}
+                >
+                  {cameraStarting ? "Requesting…" : "Start camera"}
+                </button>
+              ) : (
+                <button className="stitch-button stitch-button-secondary" type="button" onClick={stopCamera}>
+                  {isVerifying ? "Cancel" : "Stop camera"}
+                </button>
+              )}
+            </div>
           </div>
 
-          <div className={`camera-frame ${stream ? "is-live" : ""}`}>
-            <video
-              ref={videoRef}
-              className="camera-video"
-              autoPlay
-              muted
-              playsInline
-              aria-label="Live camera preview"
-            />
+          <div className={`stitch-camera-view ${stream ? "is-active" : ""}`}>
+            <video ref={videoRef} className="stitch-video" autoPlay muted playsInline aria-label="Live camera preview" />
             {!stream && (
-              <div className="camera-placeholder">
-                <div className="camera-icon" aria-hidden="true">
-                  <span />
-                </div>
-                <p>Camera preview appears here</p>
-                <span>Permission is requested only when you start the camera.</span>
+              <div className="stitch-standby">
+                <span className="stitch-camera-icon" aria-hidden="true"><i /></span>
+                <strong>Camera is inactive</strong>
+                <span>Start the camera to show the live preview.</span>
               </div>
             )}
-            {stream && <div className="camera-guide" aria-hidden="true"><span /></div>}
-            <span className="frame-corner corner-tl" />
-            <span className="frame-corner corner-tr" />
-            <span className="frame-corner corner-bl" />
-            <span className="frame-corner corner-br" />
+            {stream && (
+              <div className="stitch-face-guide" aria-hidden="true">
+                <span className="stitch-guide-label">POSITION FACE HERE</span>
+                <i />
+              </div>
+            )}
+            <span className="stitch-corner top-left" />
+            <span className="stitch-corner top-right" />
+            <span className="stitch-corner bottom-left" />
+            <span className="stitch-corner bottom-right" />
             {isVerifying && (
-              <div className="capture-overlay" aria-live="polite">
-                {phase === "countdown" && <span>Get ready · {countdown}</span>}
-                {phase === "capturing" && <span>Capturing · {frameProgress}/{FRAME_COUNT}</span>}
-                {phase === "submitting" && <span>Checking liveness, identity & schedule…</span>}
+              <div className="stitch-capture-status" aria-live="polite">
+                <span className={phase === "submitting" ? "stitch-spinner" : "stitch-status-dot"} />
+                {flowLabel}
               </div>
             )}
+            {cameraError && <div className="stitch-camera-error" role="alert">{cameraError}</div>}
           </div>
 
-          {cameraError && <p className="inline-error" role="alert">{cameraError}</p>}
-          <div className="camera-controls">
-            {!stream ? (
-              <button
-                className="button button-primary"
-                type="button"
-                onClick={() => void startCamera()}
-                disabled={cameraStarting}
-              >
-                <span className="button-icon">◎</span>
-                {cameraStarting ? "Requesting permission…" : "Start camera"}
-              </button>
-            ) : (
-              <button className="button button-secondary" type="button" onClick={stopCamera}>
-                {isVerifying ? "Cancel and stop camera" : "Stop camera"}
-              </button>
-            )}
-            <span className="camera-hint">Front camera preferred on mobile</span>
+          <div className="stitch-camera-footer">
+            <span>Mobile camera requires HTTPS. Keep your face in view during capture.</span>
+            <span className="stitch-mirror-note">MIRRORED PREVIEW</span>
           </div>
           {!secureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1" && (
-            <p className="secure-note">
-              Mobile camera access requires HTTPS. Plain HTTP is permitted only on localhost on the same device.
-            </p>
+            <p className="stitch-secure-note">Open this page over HTTPS to use a phone camera.</p>
           )}
-        </div>
+        </section>
 
-        <div className="verification-column">
-          <div className="section-heading">
-            <div>
-              <span className="step-index">02</span>
-              <h2>Challenge response</h2>
+        <div className="stitch-side-column">
+          <section className="stitch-card stitch-challenge-card">
+            <div className="stitch-card-heading">
+              <div className="stitch-heading-title">
+                <span className="stitch-step">02</span>
+                <div><h2>Challenge response</h2><span className="stitch-subheading">ONE-TIME PROMPT</span></div>
+              </div>
+              <span className="stitch-challenge-badge">{displayedChallenge ?? "RANDOMIZED"}</span>
             </div>
-            <span className="one-time-tag">ONE-TIME PROMPT</span>
-          </div>
 
-          <div className="challenge-card">
-            <div className="challenge-card-top">
-              <span className="challenge-label">YOUR INSTRUCTION</span>
-              <span className="challenge-expiry">
-                {challenge ? `${displayedChallenge} · ${challenge.expires_in_seconds}s` : "Randomized"}
-              </span>
+            <div className="stitch-prompt-label">YOUR INSTRUCTION <span>{challenge ? `${challenge.expires_in_seconds}s` : "READY"}</span></div>
+            <div className="stitch-prompt-box">
+              <span className={`stitch-direction-icon ${screenDirection === "left" ? "left" : "right"}`} aria-hidden="true">➜</span>
+              <h3>{instruction}</h3>
             </div>
-            <div className={`challenge-arrow ${challenge?.challenge === "MOVE_LEFT" ? "right" : ""}`} aria-hidden="true">
-              <span />
+            <p className="stitch-prompt-help">Keep your face in view and move naturally. The preview is mirrored, so follow the screen-side instruction.</p>
+
+            <div className="stitch-progress-heading">
+              <span>{flowLabel}</span>
+              <span>{frameProgress.toString().padStart(2, "0")} / {FRAME_COUNT}</span>
             </div>
-            <h3>{instruction}</h3>
-            <p>Keep your face in view and move naturally. Hold still when the capture completes.</p>
-            <div className="capture-progress" aria-label={`${frameProgress} of ${FRAME_COUNT} frames captured`}>
+            <div className="stitch-progress-track" aria-label={`${frameProgress} of ${FRAME_COUNT} frames captured`}>
               {Array.from({ length: FRAME_COUNT }, (_, index) => (
                 <span key={index} className={index < frameProgress ? "filled" : ""} />
               ))}
             </div>
-            <div className="progress-caption">
-              <span>{phase === "countdown" ? `Starting in ${countdown}…` : phase === "capturing" ? "CAPTURING FRAMES" : phase === "submitting" ? "SENDING TO BACKEND" : "CAPTURE PROGRESS"}</span>
-              <span>{frameProgress.toString().padStart(2, "0")} / {FRAME_COUNT}</span>
-            </div>
-          </div>
 
-          <label className="user-id-field">
-            <span>ENROLLED USER ID</span>
-            <input
-              type="text"
-              value={userId}
-              onChange={(event) => setUserId(event.target.value)}
-              placeholder="Enter an enrolled user ID"
-              autoComplete="off"
-              disabled={isVerifying}
-            />
-          </label>
-          <p className="enrollment-note">
-            Enrollment is performed separately through the backend API. This screen does not register users.
-          </p>
-
-          <div className="verification-actions">
             <button
-              className="button button-primary verify-button"
+              className="stitch-button stitch-button-primary stitch-verify-button"
               type="button"
               onClick={() => void startVerification()}
-              disabled={!stream || connection !== "online" || isVerifying || !userId.trim()}
+              disabled={!stream || connection !== "online" || isVerifying}
             >
               {isVerifying ? "Verification in progress…" : result ? "Try again" : "Start verification"}
-              {!isVerifying && <span className="button-arrow">↗</span>}
+              {!isVerifying && <span aria-hidden="true">↗</span>}
             </button>
-            <p className="action-note">
+            <p className="stitch-action-note">
               {!stream
-                ? "Start your camera to enable verification."
+                ? "Start your camera to continue."
                 : connection !== "online"
-                  ? "Connect to the backend to continue."
-                  : !userId.trim()
-                    ? "Enter an ID that has already been enrolled."
-                  : "A new prompt is generated for every attempt."}
+                  ? "Connect to the backend before verifying."
+                  : "A new movement prompt is generated for each attempt; the backend searches enrolled templates."}
             </p>
-            {connection === "offline" && (
-              <button
-                className="button button-secondary"
-                type="button"
-                onClick={recordOfflineFallback}
-              >
+          </section>
+
+          {connection === "offline" && (
+            <section className="stitch-offline-card">
+              <div><span className="stitch-offline-dot" /><strong>Offline fallback</strong></div>
+              <p>Recording this event does not grant access. Contact authorized campus staff for verification.</p>
+              <button className="stitch-button stitch-button-secondary" type="button" onClick={recordOfflineFallback}>
                 Record offline step-up
               </button>
-            )}
-            {offlineEventCount > 0 && (
-              <p className="action-note" role="status">
-                {offlineEventCount} minimal offline event{offlineEventCount === 1 ? "" : "s"} waiting to sync.
-              </p>
-            )}
-          </div>
+            </section>
+          )}
+          {connection !== "offline" && offlineEventCount > 0 && (
+            <p className="stitch-sync-note" role="status">{offlineEventCount} offline event{offlineEventCount === 1 ? "" : "s"} waiting to sync.</p>
+          )}
         </div>
       </section>
 
-      <section className="result-section" aria-live="polite">
-        <div className="result-heading">
-          <div>
-            <span className="step-index">03</span>
-            <h2>Access decision</h2>
-          </div>
-          <span className="result-caption">BACKEND-CALCULATED · NO DOOR CONTROL</span>
+      <section className="stitch-results" aria-live="polite">
+        <div className="stitch-results-heading">
+          <div className="stitch-heading-title"><span className="stitch-step">03</span><h2>Access decision</h2></div>
+          <span>BACKEND-CALCULATED · NO DOOR CONTROL</span>
         </div>
-
         {result ? (
-          <div className={`result-card ${resultTone}`}>
-            <div className="result-status">
-              <span className="result-status-mark">{result.status === "ALLOW" ? "✓" : result.status === "ERROR" || result.status === "DENY" ? "!" : "·"}</span>
+          <div className={`stitch-result-card ${resultTone}`}>
+            <div className="stitch-result-topline">
+              <span className="stitch-result-mark">{result.status === "ALLOW" ? "✓" : result.status === "ERROR" || result.status === "DENY" ? "!" : "·"}</span>
+              <div><span>ACCESS DECISION</span><strong>{statusLabel(result.status)}</strong></div>
+            </div>
+            <div className="stitch-result-metrics">
+              <div><span>CHALLENGE</span><strong>{screenChallengeLabel(result.challenge) ?? "—"}</strong></div>
+              <div><span>LIVENESS</span><strong>{result.livenessStatus ?? "—"}</strong></div>
+              <div><span>IDENTITY</span><strong>{result.identityStatus ?? "—"}</strong></div>
+              <div><span>MATCHED USER</span><strong>{result.matchedUserId ?? "—"}</strong></div>
+              <div><span>CAMPUS SCHEDULE</span><strong>{result.scheduleStatus ?? "—"}</strong></div>
+              <div><span>STEP-UP REQUIRED</span><strong>{result.requiresStepUp === undefined ? "—" : result.requiresStepUp ? "YES" : "NO"}</strong></div>
+              <div><span>MOVEMENT EVIDENCE</span><strong>{result.movementDetected === undefined ? "—" : result.movementDetected ? "DETECTED" : "NOT DETECTED"}</strong></div>
+              <div><span>VALID FRAMES</span><strong>{result.validFrameCount === undefined ? "—" : `${result.validFrameCount} / ${result.totalFrameCount}`}</strong></div>
+              <div><span>BACKEND TIME</span><strong>{result.processingTimeMs === undefined ? "—" : `${result.processingTimeMs.toFixed(1)} ms`}</strong></div>
               <div>
-                <span className="result-overline">ACCESS DECISION</span>
-                <strong>{statusLabel(result.status)}</strong>
+                <span>CAPTURE · CHALLENGE TO FINAL FRAME</span>
+                <strong>{result.captureDurationMs === undefined ? "—" : `${result.captureDurationMs.toFixed(1)} ms`}</strong>
+              </div>
+              <div>
+                <span>API ROUND-TRIP · &lt;1.5s TARGET</span>
+                <strong className={result.responseTimeMs === undefined ? "" : result.responseTimeMs < 1_500 ? "within-target" : "over-target"}>
+                  {result.responseTimeMs === undefined ? "—" : `${result.responseTimeMs.toFixed(1)} ms`}
+                </strong>
               </div>
             </div>
-            <div className="result-details">
-              <div>
-                <span>CHALLENGE</span>
-                <strong>{screenChallengeLabel(result.challenge) ?? "—"}</strong>
-              </div>
-              <div>
-                <span>LIVENESS</span>
-                <strong>{result.livenessStatus ?? "—"}</strong>
-              </div>
-              <div>
-                <span>IDENTITY</span>
-                <strong>{result.identityStatus ?? "—"}</strong>
-              </div>
-              <div>
-                <span>CAMPUS SCHEDULE</span>
-                <strong>{result.scheduleStatus ?? "—"}</strong>
-              </div>
-              <div>
-                <span>STEP-UP REQUIRED</span>
-                <strong>{result.requiresStepUp === undefined ? "—" : result.requiresStepUp ? "YES" : "NO"}</strong>
-              </div>
-              <div>
-                <span>MOVEMENT EVIDENCE</span>
-                <strong>{result.movementDetected === undefined ? "—" : result.movementDetected ? "DETECTED" : "NOT DETECTED"}</strong>
-              </div>
-              <div>
-                <span>VALID FRAMES</span>
-                <strong>{result.validFrameCount === undefined ? "—" : `${result.validFrameCount} / ${result.totalFrameCount}`}</strong>
-              </div>
-              <div>
-                <span>BACKEND TIME</span>
-                <strong>{result.processingTimeMs === undefined ? "—" : `${result.processingTimeMs.toFixed(1)} ms`}</strong>
-              </div>
+            <div className="stitch-result-messages">
+              <p>{result.message}</p>
+              {result.identityMessage && <p>Identity check: {result.identityMessage}</p>}
+              {result.responseTimeMs !== undefined && (
+                <p>API round-trip is measured in this browser from sending the captured frames until the backend decision response arrives. Capture duration includes the challenge request and countdown through the final frame.</p>
+              )}
             </div>
-            <p className="result-message">{result.message}</p>
-            {result.identityMessage && (
-              <p className="result-message">Identity check: {result.identityMessage}</p>
-            )}
           </div>
         ) : (
-          <div className="result-empty">
-            <span className="empty-mark">—</span>
-            <span>Your result will appear here after the challenge.</span>
-          </div>
+          <div className="stitch-result-empty"><span>—</span><p>Your backend-calculated result will appear here after verification.</p></div>
         )}
       </section>
 
-      <footer className="disclaimer">
-        <span className="disclaimer-mark">i</span>
-        <p><strong>Experimental access-decision prototype.</strong> Movement heuristics may be replayed, and the demonstration schedule is not verified campus policy. Step-up requests are not access grants. No physical door controller is connected.</p>
-        <span className="footer-version">HID · MVP</span>
+      <footer className="stitch-disclaimer">
+        <span aria-hidden="true">i</span>
+        <p><strong>Experimental prototype.</strong> Movement alone cannot distinguish a live person from a video replay. Step-up is not an access grant. No physical door is connected.</p>
+        <span className="stitch-footer-mark">HID · DEMO</span>
       </footer>
     </main>
   );

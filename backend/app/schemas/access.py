@@ -22,11 +22,13 @@ class ScheduleStatus(str, Enum):
 
 
 class AccessDecisionRequest(LivenessCheckRequest):
-    user_id: str = Field(min_length=1, max_length=128)
+    user_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @field_validator("user_id")
     @classmethod
-    def normalize_user_id(cls, value: str) -> str:
+    def normalize_user_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         normalized = value.strip()
         if not normalized:
             raise ValueError("user_id must not be empty.")
@@ -42,6 +44,7 @@ class AccessDecisionResponse(BaseModel):
     schedule_status: ScheduleStatus
     reason: str
     identity_message: str = ""
+    matched_user_id: str | None = None
     requires_step_up: bool
     movement_detected: bool
     valid_frame_count: int = Field(ge=0)

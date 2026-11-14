@@ -2,7 +2,7 @@
 
 ## Contract status
 
-`GET /api/health`, `POST /api/face/detect`, `POST /api/liveness/challenge`, `POST /api/liveness/check`, `POST /api/auth/register`, `POST /api/auth/verify`, and `POST /api/access/decision` are implemented. Access decisions are experimental and do not control a physical door.
+`GET /api/health`, `POST /api/face/detect`, `POST /api/liveness/challenge`, `POST /api/liveness/check`, `POST /api/auth/register`, `POST /api/auth/register/batch`, `POST /api/auth/verify`, and `POST /api/access/decision` are implemented. Access decisions are experimental and do not control a physical door.
 
 The API is version `0.1.0` today. Health, face-detection, liveness, face-authentication, and access-decision request/response models are implemented. JSON endpoints use `Content-Type: application/json`.
 
@@ -11,7 +11,7 @@ The API is version `0.1.0` today. Health, face-detection, liveness, face-authent
 ### Status values
 
 - Liveness: `LIVE`, `SPOOF_SUSPECTED`, `UNCERTAIN`
-- Identity: `VERIFIED`, `NOT_VERIFIED`, `NOT_CHECKED`
+- Identity: `VERIFIED`, `NOT_VERIFIED`, `NOT_CHECKED`, `AMBIGUOUS`
 - Access decision: `ALLOW`, `STEP_UP_VERIFICATION`, `DENY`
 
 `NOT_CHECKED` means identity was deliberately not evaluated, for example during face detection or liveness-only analysis. It is not equivalent to a failed identity match.
@@ -306,6 +306,70 @@ Possible errors: `403` consent is false; `409` user ID already enrolled; `413` i
 
 Consent is an explicit API confirmation, not a legal-consent workflow or proof of the user's identity. Callers must explain purpose, storage, and retention before sending a request.
 
+## 5.1 Batch face enrollment
+
+**Status: Implemented — consent-gated multi-photo enrollment**
+
+- **Method and path:** `POST /api/auth/register/batch`
+- **Purpose:** Process multiple reference photos once, deduplicate near-identical embeddings, and create or update one normalized SFace template for the supplied user ID. This endpoint enrolls a template only; it does not assess liveness, verify identity, or make an access decision.
+- **Required fields:**
+  - `user_id`: non-empty ID, up to 128 characters.
+  - `consent`: required boolean; it must be `true`.
+  - `images_base64`: 2–10 Base64 JPEG strings, without data-URL prefixes.
+- **Limits:** Each decoded JPEG is limited to 5 MiB and the combined Base64 data to 20 MiB. The server requires exactly one detected face per accepted photo. Its basic quality gate rejects images under 96 pixels on either edge, mean grayscale brightness outside 15–240, or Laplacian sharpness variance below 5. These are uncalibrated technical filters, not guarantees of a usable biometric sample. At least two distinct, usable photos must remain before the stored template is changed.
+- **Storage:** The backend normalizes each accepted embedding, deduplicates embeddings with cosine similarity at or above `0.995`, averages the remaining embeddings, then normalizes the aggregate. An existing user template is updated; otherwise a new template is created. Original images are not stored.
+
+Example request (abbreviated values):
+
+```json
+{
+  "user_id": "person-12345",
+  "consent": true,
+  "images_base64": [
+    "<photo-1-base64-JPEG>",
+    "<photo-2-base64-JPEG>",
+    "<photo-3-base64-JPEG>"
+  ]
+}
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "registered": true,
+  "updated": false,
+  "user_id": "person-12345",
+  "photo_results": [
+    {
+      "photo_index": 1,
+      "status": "ACCEPTED",
+      "message": "Reference photo passed validation and was processed."
+    },
+    {
+      "photo_index": 2,
+      "status": "DUPLICATE",
+      "message": "This photo is too similar to another selected reference."
+    },
+    {
+      "photo_index": 3,
+      "status": "ACCEPTED",
+      "message": "Reference photo passed validation and was processed."
+    }
+  ],
+  "accepted_photo_count": 2,
+  "rejected_photo_count": 0,
+  "duplicate_photo_count": 1,
+  "processing_time_ms": 52.1,
+  "message": "The face template was created from the accepted reference photos. No access was granted."
+}
+```
+
+The sample response is illustrative; actual enrollment requires at least two accepted photos, and `processing_time_ms` is measured by the backend. `photo_results` reports each input as `ACCEPTED`, `REJECTED`, or `DUPLICATE`. A well-formed batch can return `success: true` and `registered: false` when too few distinct usable photos remain; in that case the stored template is unchanged. The frontend keeps accepted photos temporarily to allow adding more references and retrying.
+
+Possible errors: `403` consent is false; `413` image or aggregate payload exceeds its limit; `422` wrong count, malformed Base64, non-JPEG data, or invalid request fields; `503` the model or SQLite store is unavailable. Per-photo face-count, decoding, and quality failures are included in `photo_results`.
+
 ## 6. Face verification
 
 **Status: Implemented — 1:1 SFace comparison**
@@ -363,9 +427,9 @@ No DELETE API is implemented. For this local prototype, stop the backend and rem
 - **Purpose:** Consume a server-issued movement challenge, assess its ordered frames, compare the last Haar-valid frame with the enrolled user's SFace representation, evaluate the configured campus schedule, and calculate one access decision.
 - **Request format:** JSON; `extra="forbid"` means client-supplied statuses, schedule results, confidence, or decisions are rejected.
 - **Required fields:**
-  - `user_id`: enrolled user ID.
   - `challenge_id`: ID returned by `POST /api/liveness/challenge`.
   - `frames`: ordered Base64 JPEG strings, 5–20 frames, maximum 5 MiB decoded per frame and 20 MiB combined Base64 payload.
+- **Optional field:** `user_id`. When supplied, the endpoint preserves the existing 1:1 check. When omitted, the backend compares the selected live frame against enrolled templates and identifies only a unique match.
 - **Challenge behavior:** Uses the same 60-second, process-local, one-time challenge store as `/api/liveness/check`. Unknown, expired, and consumed IDs return `404`, `410`, and `409`, respectively.
 - **Image behavior:** Runs the existing movement analyzer and passes its last valid face frame to the existing SFace verification service. The frame is already in the request sequence; the client does not send an extra identity image. If no valid frame or identity cannot be checked, identity is `NOT_CHECKED` and the decision cannot be `ALLOW`.
 - **Identity detail:** `identity_message` explains whether identity was verified, mismatched, unevaluable because no single face was available, or unavailable because the local enrollment/model could not be used.
@@ -374,7 +438,6 @@ Example request:
 
 ```json
 {
-  "user_id": "person-12345",
   "challenge_id": "server-issued-challenge-id",
   "frames": [
     "<ordered-base64-JPEG-frame-1>",
@@ -395,7 +458,9 @@ Example response (timing is illustrative):
   "challenge_id": "server-issued-challenge-id",
   "liveness_status": "LIVE",
   "identity_status": "VERIFIED",
+  "matched_user_id": "person-12345",
   "schedule_status": "WITHIN_SCHEDULE",
+  "identity_message": "The face matched one enrolled representation.",
   "reason": "Identity and liveness verified; access is permitted by the configured campus schedule.",
   "requires_step_up": false,
   "movement_detected": true,
@@ -415,6 +480,7 @@ Example response (timing is illustrative):
 | `LIVE` | `VERIFIED` | `OUTSIDE_SCHEDULE` | `STEP_UP_VERIFICATION` |
 | `LIVE` | `VERIFIED` | `UNAVAILABLE` | `STEP_UP_VERIFICATION` |
 | `UNCERTAIN` | `VERIFIED` or `NOT_CHECKED` | Any | `STEP_UP_VERIFICATION` |
+| Any | `AMBIGUOUS` | Any | `STEP_UP_VERIFICATION` |
 | `SPOOF_SUSPECTED` | Any | Any | `DENY` |
 | Any, including `UNCERTAIN` | `NOT_VERIFIED` | Any | `DENY` |
 | `LIVE` | `NOT_CHECKED` | Any | `DENY` |
@@ -428,6 +494,8 @@ A failed liveness assessment or confirmed identity mismatch is denied before sch
 The default JSON schedule is `backend/config/campus_schedule.json`; set `CAMPUS_SCHEDULE_PATH` to use another file. It is read for each decision, so schedule edits do not require a process restart. The default timezone is `Asia/Kolkata`. Every weekday must have either a `closed: true` entry or an `open`/`close` window in `HH:MM` 24-hour format; closing must follow opening and windows do not cross midnight. Optional ISO dates in `exceptions` override the weekly entry for that local date. Opening is inclusive and closing is exclusive.
 
 The included weekday hours and dated exceptions are **demonstration timings only, not verified PES University or other campus policy**. Replace them with timings approved by the campus. Missing, invalid, unreadable, or timezone-unresolvable configuration produces `schedule_status: UNAVAILABLE`, which can never yield `ALLOW`. `tzdata` supplies IANA timezone data on Windows.
+
+Automatic matching compares against the precomputed templates in the local database. No match is `NOT_VERIFIED` and is denied; multiple matches at the configured SFace threshold are `AMBIGUOUS` and require step-up. A single reference photo or enrollment request cannot call this access endpoint: a new, unexpired one-time challenge and the ordered frame sequence are required. The movement heuristic can be replayed and is not proof of liveness; do not claim that reference photos, prerecorded videos, or other presentation attacks are reliably rejected.
 
 This prototype has no individual student/staff role permissions or per-user schedule rules. Schedule compliance is only one part of a policy and is not authorization by itself.
 

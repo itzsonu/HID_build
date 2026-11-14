@@ -14,6 +14,7 @@ from app.services.access_decision import decide_access
 from app.services.campus_schedule import campus_schedule
 from app.services.face_authentication import (
     FaceIdentityEvaluation,
+    identify_enrolled_face,
     verify_enrolled_face,
 )
 from app.services.face_detection import (
@@ -26,6 +27,7 @@ from app.services.face_recognition import (
     FaceRecognitionUnavailableError,
     MultipleFacesDetectedError,
     NoFaceDetectedError,
+    PoorImageQualityError,
     face_embedding_service,
 )
 from app.services.face_store import FaceStoreUnavailableError, face_store
@@ -58,6 +60,7 @@ def sync_offline_decisions(request: OfflineSyncRequest) -> OfflineSyncResponse:
 def make_access_decision(
     request: AccessDecisionRequest,
 ) -> AccessDecisionResponse:
+    started_at = perf_counter()
     try:
         challenge = challenge_store.consume(request.challenge_id)
     except ChallengeExpiredError as exc:
@@ -67,7 +70,6 @@ def make_access_decision(
     except ChallengeNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    started_at = perf_counter()
     frames = request.decoded_frames()
     try:
         liveness = movement_analyzer.evaluate(challenge, frames)
@@ -79,7 +81,11 @@ def make_access_decision(
             detail="Face detector is unavailable.",
         ) from exc
 
-    identity = _check_identity(request.user_id, frames, liveness.last_valid_frame_index)
+    identity = _check_identity(
+        request.user_id,
+        frames,
+        liveness.last_valid_frame_index,
+    )
     schedule = campus_schedule.evaluate()
     policy = decide_access(
         liveness.status,
@@ -95,6 +101,7 @@ def make_access_decision(
         schedule_status=schedule.status,
         reason=policy.reason,
         identity_message=identity.message,
+        matched_user_id=identity.matched_user_id,
         requires_step_up=policy.decision is AccessDecision.STEP_UP_VERIFICATION,
         movement_detected=liveness.movement_detected,
         valid_frame_count=liveness.valid_frame_count,
@@ -104,7 +111,7 @@ def make_access_decision(
 
 
 def _check_identity(
-    user_id: str,
+    user_id: str | None,
     frames: list[bytes],
     last_valid_frame_index: int | None,
 ) -> FaceIdentityEvaluation:
@@ -117,9 +124,16 @@ def _check_identity(
         )
 
     try:
+        image_bytes = frames[last_valid_frame_index]
+        if user_id is None:
+            return identify_enrolled_face(
+                image_bytes,
+                face_store,
+                face_embedding_service,
+            )
         return verify_enrolled_face(
             user_id,
-            frames[last_valid_frame_index],
+            image_bytes,
             face_store,
             face_embedding_service,
         )
@@ -145,6 +159,13 @@ def _check_identity(
             None,
             face_embedding_service.threshold,
             "The identity model detected multiple faces in the selected frame.",
+        )
+    except PoorImageQualityError as exc:
+        return FaceIdentityEvaluation(
+            IdentityStatus.NOT_CHECKED,
+            None,
+            face_embedding_service.threshold,
+            str(exc),
         )
     except FaceRecognitionUnavailableError:
         return FaceIdentityEvaluation(

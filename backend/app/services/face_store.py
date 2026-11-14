@@ -91,6 +91,39 @@ class SQLiteFaceStore:
                 "The local face database is unavailable."
             ) from exc
 
+    def upsert_template(self, user_id: str, embedding: np.ndarray) -> bool:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        embedding_blob = np.asarray(embedding, dtype="<f4").reshape(-1).tobytes()
+        if len(embedding_blob) != EMBEDDING_BYTES:
+            raise FaceStoreUnavailableError(
+                "The face representation has an unexpected size."
+            )
+
+        try:
+            with closing(self._open()) as connection:
+                with connection:
+                    self._initialize(connection)
+                    existing = connection.execute(
+                        "SELECT 1 FROM face_embeddings WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()
+                    connection.execute(
+                        """
+                        INSERT INTO face_embeddings
+                            (user_id, embedding, consented_at, created_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            embedding = excluded.embedding,
+                            consented_at = excluded.consented_at
+                        """,
+                        (user_id, embedding_blob, now, now),
+                    )
+                    return existing is not None
+        except sqlite3.Error as exc:
+            raise FaceStoreUnavailableError(
+                "The local face database is unavailable."
+            ) from exc
+
     def get_embedding(self, user_id: str) -> bytes | None:
         try:
             with closing(self._open()) as connection:
@@ -101,6 +134,20 @@ class SQLiteFaceStore:
                         (user_id,),
                     ).fetchone()
                     return None if row is None else bytes(row[0])
+        except sqlite3.Error as exc:
+            raise FaceStoreUnavailableError(
+                "The local face database is unavailable."
+            ) from exc
+
+    def get_all_embeddings(self) -> list[tuple[str, bytes]]:
+        try:
+            with closing(self._open()) as connection:
+                with connection:
+                    self._initialize(connection)
+                    rows = connection.execute(
+                        "SELECT user_id, embedding FROM face_embeddings ORDER BY user_id"
+                    ).fetchall()
+                    return [(str(user_id), bytes(embedding)) for user_id, embedding in rows]
         except sqlite3.Error as exc:
             raise FaceStoreUnavailableError(
                 "The local face database is unavailable."

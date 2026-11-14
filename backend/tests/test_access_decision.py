@@ -27,6 +27,7 @@ from app.services.liveness import (
     LivenessEvaluation,
     MovementAnalyzer,
 )
+from app.services.face_recognition import PoorImageQualityError
 from app.services.face_store import SQLiteFaceStore
 
 client = TestClient(app)
@@ -55,9 +56,11 @@ def access_environment(monkeypatch):
             0.9,
             0.363,
             "Mocked identity result.",
+            "demo-user",
         ),
         "schedule": ScheduleEvaluation(ScheduleStatus.WITHIN_SCHEDULE),
         "identity_frames": [],
+        "automatic_identity_frames": [],
     }
 
     def evaluate_liveness(challenge, frames):
@@ -69,6 +72,10 @@ def access_environment(monkeypatch):
         state["identity_frames"].append((user_id, image_bytes))
         return state["identity"]
 
+    def identify_identity(image_bytes, face_store, embedding_service):
+        state["automatic_identity_frames"].append(image_bytes)
+        return state["identity"]
+
     monkeypatch.setattr(access_routes, "challenge_store", store)
     monkeypatch.setattr(
         access_routes.movement_analyzer,
@@ -76,6 +83,7 @@ def access_environment(monkeypatch):
         evaluate_liveness,
     )
     monkeypatch.setattr(access_routes, "verify_enrolled_face", verify_identity)
+    monkeypatch.setattr(access_routes, "identify_enrolled_face", identify_identity)
     monkeypatch.setattr(
         access_routes.campus_schedule,
         "evaluate",
@@ -134,9 +142,45 @@ def test_live_verified_within_schedule_allows_and_reuses_last_valid_frame(
     assert body["schedule_status"] == "WITHIN_SCHEDULE"
     assert body["requires_step_up"] is False
     assert body["processing_time_ms"] >= 0
+    assert body["matched_user_id"] == "demo-user"
     assert state["identity_frames"] == [
         ("demo-user", base64.b64decode(JPEG_FRAMES[5]))
     ]
+
+
+def test_matching_motion_sequence_cannot_allow_video_replay(
+    access_environment, monkeypatch
+) -> None:
+    store, _ = access_environment
+    challenge = LivenessChallenge.MOVE_RIGHT
+    monkeypatch.setattr("app.services.liveness.secrets.choice", lambda _: challenge)
+    challenge_id = issue_challenge(store)
+    centers = iter([0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52, 0.56])
+
+    def detect_moving_face(_: bytes) -> DetectionResult:
+        center = next(centers)
+        x = round(center * 100 - 20)
+        return DetectionResult(100, 100, [(x, 30, 40, 40)])
+
+    monkeypatch.setattr(face_detector, "detect", detect_moving_face)
+    monkeypatch.setattr(
+        access_routes.movement_analyzer,
+        "evaluate",
+        MovementAnalyzer().evaluate,
+    )
+
+    response = client.post(
+        "/api/access/decision",
+        json=decision_payload(challenge_id),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["decision"] == "STEP_UP_VERIFICATION"
+    assert body["liveness_status"] == "UNCERTAIN"
+    assert body["movement_detected"] is True
+    assert body["identity_status"] == "VERIFIED"
+    assert body["schedule_status"] == "WITHIN_SCHEDULE"
 
 
 @pytest.mark.parametrize(
@@ -171,6 +215,12 @@ def test_live_verified_within_schedule_allows_and_reuses_last_valid_frame(
             IdentityStatus.NOT_CHECKED,
             ScheduleStatus.WITHIN_SCHEDULE,
             AccessDecision.DENY,
+        ),
+        (
+            LivenessStatus.LIVE,
+            IdentityStatus.AMBIGUOUS,
+            ScheduleStatus.WITHIN_SCHEDULE,
+            AccessDecision.STEP_UP_VERIFICATION,
         ),
         (
             LivenessStatus.LIVE,
@@ -244,6 +294,74 @@ def test_missing_or_unknown_challenge_never_allows(
     assert state["identity_frames"] == []
 
 
+def test_automatic_identity_search_uses_backend_match_without_user_id(
+    access_environment,
+) -> None:
+    store, state = access_environment
+    challenge_id = issue_challenge(store)
+    payload = decision_payload(challenge_id)
+    payload.pop("user_id")
+
+    response = client.post("/api/access/decision", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["decision"] == "ALLOW"
+    assert body["identity_status"] == "VERIFIED"
+    assert body["matched_user_id"] == "demo-user"
+    assert state["identity_frames"] == []
+    assert state["automatic_identity_frames"] == [
+        base64.b64decode(JPEG_FRAMES[5])
+    ]
+
+
+@pytest.mark.parametrize(
+    ("identity_status", "expected_decision"),
+    [
+        (IdentityStatus.NOT_VERIFIED, AccessDecision.DENY),
+        (IdentityStatus.AMBIGUOUS, AccessDecision.STEP_UP_VERIFICATION),
+    ],
+)
+def test_automatic_identity_no_match_or_ambiguity_fails_closed(
+    access_environment,
+    identity_status: IdentityStatus,
+    expected_decision: AccessDecision,
+) -> None:
+    store, state = access_environment
+    state["identity"] = FaceIdentityEvaluation(
+        identity_status,
+        None,
+        0.363,
+        "Mocked automatic identity result.",
+    )
+    challenge_id = issue_challenge(store)
+    payload = decision_payload(challenge_id)
+    payload.pop("user_id")
+
+    response = client.post("/api/access/decision", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["decision"] == expected_decision.value
+    assert response.json()["identity_status"] == identity_status.value
+    assert response.json()["matched_user_id"] is None
+
+
+def test_reference_photo_alone_cannot_request_an_access_decision(
+    access_environment,
+) -> None:
+    _, state = access_environment
+
+    response = client.post(
+        "/api/access/decision",
+        json={"image_base64": base64.b64encode(b"\xff\xd8\xffphoto").decode("ascii")},
+    )
+
+    assert response.status_code == 422
+    assert "decision" not in response.json()
+    assert state["identity_frames"] == []
+    assert state["automatic_identity_frames"] == []
+
+
 def test_missing_challenge_field_is_rejected(access_environment) -> None:
     _, state = access_environment
     payload = decision_payload("not-used")
@@ -253,6 +371,25 @@ def test_missing_challenge_field_is_rejected(access_environment) -> None:
 
     assert response.status_code == 422
     assert state["identity_frames"] == []
+
+
+def test_poor_quality_live_frame_fails_closed(access_environment, monkeypatch) -> None:
+    store, _ = access_environment
+
+    def reject_poor_quality(*_args, **_kwargs):
+        raise PoorImageQualityError("The photo is too blurred.")
+
+    monkeypatch.setattr(access_routes, "identify_enrolled_face", reject_poor_quality)
+    challenge_id = issue_challenge(store)
+    payload = decision_payload(challenge_id)
+    payload.pop("user_id")
+
+    response = client.post("/api/access/decision", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["decision"] == "DENY"
+    assert response.json()["identity_status"] == "NOT_CHECKED"
+    assert "blurred" in response.json()["identity_message"]
 
 
 def test_expired_challenge_is_rejected(monkeypatch, access_environment) -> None:

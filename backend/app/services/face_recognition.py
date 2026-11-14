@@ -34,6 +34,10 @@ class InvalidFaceEmbeddingError(FaceRecognitionError):
     """Raised when the model returns an unusable face representation."""
 
 
+class PoorImageQualityError(FaceRecognitionError):
+    """Raised when an image is too small, blurred, or poorly exposed."""
+
+
 def normalize_embedding(value: np.ndarray) -> np.ndarray:
     embedding = np.asarray(value, dtype=np.float32).reshape(-1)
     if embedding.size != EMBEDDING_SIZE or not np.isfinite(embedding).all():
@@ -106,9 +110,30 @@ class SFaceEmbeddingService:
         self._recognizer = recognizer
         return detector, recognizer
 
-    def extract_embedding(self, image_bytes: bytes) -> np.ndarray:
+    def warm_up(self) -> None:
+        """Load the local models and run a harmless inference before access requests."""
+        with self._lock:
+            detector, recognizer = self._load_models()
+            blank_frame = np.zeros((320, 320, 3), dtype=np.uint8)
+            try:
+                detector.setInputSize((320, 320))
+                detector.detect(blank_frame)
+                recognizer.feature(np.zeros((112, 112, 3), dtype=np.uint8))
+            except cv2.error as exc:
+                raise FaceRecognitionUnavailableError(
+                    "The local face models could not complete warm-up."
+                ) from exc
+
+    def extract_embedding(
+        self,
+        image_bytes: bytes,
+        *,
+        require_quality: bool = False,
+    ) -> np.ndarray:
         image = decode_jpeg(image_bytes)
         image_height, image_width = image.shape[:2]
+        if require_quality:
+            self._validate_image_quality(image)
         with self._lock:
             detector, recognizer = self._load_models()
             try:
@@ -131,6 +156,32 @@ class SFaceEmbeddingService:
                 ) from exc
 
         return normalize_embedding(embedding)
+
+    @staticmethod
+    def _validate_image_quality(image: np.ndarray) -> None:
+        image_height, image_width = image.shape[:2]
+        if min(image_height, image_width) < 96:
+            raise PoorImageQualityError(
+                "The photo is too small; use a clear image at least 96 pixels wide and tall."
+            )
+
+        try:
+            grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            brightness = float(np.mean(grayscale))
+            sharpness = float(cv2.Laplacian(grayscale, cv2.CV_64F).var())
+        except cv2.error as exc:
+            raise FaceRecognitionUnavailableError(
+                "Image quality could not be evaluated."
+            ) from exc
+
+        if brightness < 15 or brightness > 240:
+            raise PoorImageQualityError(
+                "The photo is too dark or overexposed; use even lighting."
+            )
+        if sharpness < 5:
+            raise PoorImageQualityError(
+                "The photo is too blurred or low-detail; retake it in focus."
+            )
 
 
 face_embedding_service = SFaceEmbeddingService()
