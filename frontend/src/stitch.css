@@ -475,6 +475,84 @@ body {
   line-height: 1.5;
 }
 
+.stitch-admin-enrollments {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 15px;
+  border-top: 1px solid var(--stitch-line);
+}
+
+.stitch-admin-heading,
+.stitch-admin-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stitch-admin-heading h3 {
+  margin: 0;
+  color: var(--stitch-text);
+  font-size: 12px;
+}
+
+.stitch-admin-heading p,
+.stitch-admin-status,
+.stitch-admin-error {
+  margin: 4px 0 0;
+  color: #8391a5;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.stitch-admin-error { color: #fda4af; }
+.stitch-admin-status { color: #6ee7b7; }
+
+.stitch-admin-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stitch-admin-list li {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--stitch-line);
+  border-radius: 7px;
+  background: rgba(13, 20, 33, 0.65);
+}
+
+.stitch-admin-list li > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.stitch-admin-list strong {
+  overflow-wrap: anywhere;
+  color: var(--stitch-text);
+  font-size: 10px;
+}
+
+.stitch-admin-list small {
+  color: #8391a5;
+  font-size: 9px;
+}
+
+.stitch-button-danger {
+  border-color: rgba(253, 164, 175, 0.3);
+  background: rgba(127, 29, 29, 0.18);
+  color: #fda4af;
+}
+
+.stitch-button-danger:hover:not(:disabled) {
+  border-color: rgba(253, 164, 175, 0.6);
+  background: rgba(127, 29, 29, 0.3);
+}
+
 .stitch-enrollment-progress,
 .stitch-enrollment-notice {
   margin: 11px 0 0;
@@ -1332,6 +1410,7 @@ body {
   .stitch-intro-copy > p { font-size: 11px; }
   .stitch-enrollment { padding: 12px; }
   .stitch-enrollment-controls { grid-template-columns: 1fr; }
+  .stitch-admin-heading { align-items: stretch; flex-direction: column; }
   .stitch-enrollment-camera-view { min-height: 150px; }
   .stitch-enrollment-camera-preview { min-height: 150px; }
   .stitch-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

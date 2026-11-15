@@ -43,12 +43,12 @@ def access_environment(monkeypatch):
     store = InMemoryChallengeStore()
     state = {
         "liveness": LivenessEvaluation(
-            LivenessStatus.LIVE,
+            LivenessStatus.UNCERTAIN,
             0.9,
             True,
             FRAME_COUNT,
             FRAME_COUNT,
-            "Mocked liveness result.",
+            "Movement alone cannot establish liveness.",
             5,
         ),
         "identity": FaceIdentityEvaluation(
@@ -123,7 +123,7 @@ def test_movement_analyzer_records_last_valid_frame_for_identity_reuse(
     assert evaluation.last_valid_frame_index == 5
 
 
-def test_live_verified_within_schedule_allows_and_reuses_last_valid_frame(
+def test_uncertain_liveness_with_verified_identity_steps_up_and_reuses_last_valid_frame(
     access_environment,
 ) -> None:
     store, state = access_environment
@@ -136,11 +136,12 @@ def test_live_verified_within_schedule_allows_and_reuses_last_valid_frame(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["decision"] == "ALLOW"
-    assert body["liveness_status"] == "LIVE"
+    assert body["decision"] == "STEP_UP_VERIFICATION"
+    assert body["liveness_status"] == "UNCERTAIN"
     assert body["identity_status"] == "VERIFIED"
     assert body["schedule_status"] == "WITHIN_SCHEDULE"
-    assert body["requires_step_up"] is False
+    assert body["requires_step_up"] is True
+    assert "no tested presentation-attack detection model is configured" in body["reason"]
     assert body["processing_time_ms"] >= 0
     assert body["matched_user_id"] == "demo-user"
     assert state["identity_frames"] == [
@@ -186,6 +187,12 @@ def test_matching_motion_sequence_cannot_allow_video_replay(
 @pytest.mark.parametrize(
     ("liveness", "identity", "schedule", "expected"),
     [
+        (
+            LivenessStatus.LIVE,
+            IdentityStatus.VERIFIED,
+            ScheduleStatus.WITHIN_SCHEDULE,
+            AccessDecision.STEP_UP_VERIFICATION,
+        ),
         (
             LivenessStatus.LIVE,
             IdentityStatus.VERIFIED,
@@ -306,7 +313,7 @@ def test_automatic_identity_search_uses_backend_match_without_user_id(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["decision"] == "ALLOW"
+    assert body["decision"] == "STEP_UP_VERIFICATION"
     assert body["identity_status"] == "VERIFIED"
     assert body["matched_user_id"] == "demo-user"
     assert state["identity_frames"] == []
@@ -416,7 +423,7 @@ def test_reused_challenge_is_rejected(access_environment) -> None:
     second = client.post("/api/access/decision", json=payload)
 
     assert first.status_code == 200
-    assert first.json()["decision"] == "ALLOW"
+    assert first.json()["decision"] == "STEP_UP_VERIFICATION"
     assert second.status_code == 409
 
 

@@ -7,8 +7,11 @@ import {
 
 import {
   ApiError,
+  deleteAdminEnrollment,
+  getAdminEnrollments,
   registerFacesBatch,
   type BatchFaceRegistrationResponse,
+  type EnrollmentSummary,
   type EnrollmentPhotoStatus,
 } from "../services/api";
 import {
@@ -98,6 +101,12 @@ export default function BatchEnrollment({
   onEnrollmentFinished,
 }: BatchEnrollmentProps) {
   const [userId, setUserId] = useState("");
+  const [adminSecret, setAdminSecret] = useState("");
+  const [enrollments, setEnrollments] = useState<EnrollmentSummary[]>([]);
+  const [adminStatus, setAdminStatus] = useState("");
+  const [adminError, setAdminError] = useState("");
+  const [isLoadingEnrollments, setIsLoadingEnrollments] = useState(false);
+  const [deletingUserId, setDeletingUserId] = useState("");
   const [consent, setConsent] = useState(false);
   const [photos, setPhotos] = useState<EnrollmentPhoto[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -326,6 +335,50 @@ export default function BatchEnrollment({
     setNotice("");
   };
 
+  const loadEnrollments = async (secret: string = adminSecret) => {
+    if (!secret.trim()) {
+      setAdminError("Enter the configured admin secret to manage enrollments.");
+      return;
+    }
+    setIsLoadingEnrollments(true);
+    setAdminError("");
+    setAdminStatus("");
+    try {
+      const result = await getAdminEnrollments(secret.trim());
+      setEnrollments(result.enrollments);
+      setAdminStatus(
+        `Loaded ${result.enrollments.length} enrolled ${result.enrollments.length === 1 ? "user" : "users"}.`,
+      );
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : "Enrollment records could not be loaded.");
+      setEnrollments([]);
+    } finally {
+      setIsLoadingEnrollments(false);
+    }
+  };
+
+  const deleteEnrollment = async (targetUserId: string) => {
+    if (!adminSecret.trim()) {
+      setAdminError("Enter the configured admin secret to delete an enrollment.");
+      return;
+    }
+    if (!window.confirm(`Delete all face templates for ${targetUserId}? This cannot be undone.`)) {
+      return;
+    }
+    setDeletingUserId(targetUserId);
+    setAdminError("");
+    setAdminStatus("");
+    try {
+      await deleteAdminEnrollment(targetUserId, adminSecret.trim());
+      setEnrollments((current) => current.filter((entry) => entry.user_id !== targetUserId));
+      setAdminStatus(`Deleted face templates for ${targetUserId}.`);
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : "The enrollment could not be deleted.");
+    } finally {
+      setDeletingUserId("");
+    }
+  };
+
   const submitEnrollment = async () => {
     const readyPhotos = photos.filter(
       (photo) =>
@@ -338,6 +391,10 @@ export default function BatchEnrollment({
     }
     if (!consent) {
       setNotice("Confirm consent before sending biometric photos.");
+      return;
+    }
+    if (!adminSecret.trim()) {
+      setNotice("Enter the configured admin secret before enrolling a user.");
       return;
     }
     if (readyPhotos.length < 2) {
@@ -363,10 +420,15 @@ export default function BatchEnrollment({
         userId.trim(),
         readyPhotos.map((photo) => photo.base64),
         true,
+        adminSecret.trim(),
       );
       registered = result.registered;
       setResponse(result);
       const resultsByIndex = new Map(result.photo_results.map((item) => [item.photo_index, item]));
+      readyPhotos.forEach((photo) => {
+        URL.revokeObjectURL(photo.previewUrl);
+        previewUrlsRef.current.delete(photo.previewUrl);
+      });
       setPhotos((current) => current.map((photo) => {
         const submittedIndex = readyPhotos.findIndex((submitted) => submitted.id === photo.id);
         const photoResult = submittedIndex >= 0 ? resultsByIndex.get(submittedIndex + 1) : undefined;
@@ -375,26 +437,38 @@ export default function BatchEnrollment({
         }
         return {
           ...photo,
-          base64: result.registered || photoResult.status !== "ACCEPTED" ? "" : photo.base64,
-          stage: result.registered || photoResult.status !== "ACCEPTED"
-            ? photoResult.status
-            : "ready",
+          base64: "",
+          previewUrl: "",
+          stage: photoResult.status,
           message: result.registered
             ? photoResult.message
             : photoResult.status === "ACCEPTED"
-              ? "Backend accepted this photo; add more distinct references and retry to complete the template."
+              ? "Backend accepted this photo but did not complete enrollment. Reselect it with additional distinct references to retry."
               : photoResult.message,
         };
       }));
       setNotice(result.registered ? "" : result.message);
+      if (result.registered) {
+        void loadEnrollments(adminSecret.trim());
+      }
     } catch (error) {
       const message = error instanceof ApiError
         ? error.message
         : error instanceof Error
           ? error.message
           : "Enrollment could not be completed.";
+      readyPhotos.forEach((photo) => {
+        URL.revokeObjectURL(photo.previewUrl);
+        previewUrlsRef.current.delete(photo.previewUrl);
+      });
       setPhotos((current) => current.map((photo) => photo.stage === "submitting"
-        ? { ...photo, stage: "error", message: "The backend did not confirm this photo's enrollment." }
+        ? {
+          ...photo,
+          base64: "",
+          previewUrl: "",
+          stage: "error",
+          message: "The backend did not confirm this photo's enrollment. Reselect it before retrying.",
+        }
         : photo));
       setNotice(message);
     } finally {
@@ -441,6 +515,22 @@ export default function BatchEnrollment({
             placeholder="Enter the person’s user ID"
             autoComplete="off"
             disabled={isSubmitting}
+          />
+        </label>
+        <label className="stitch-enrollment-user">
+          <span>ADMIN SECRET</span>
+          <input
+            type="password"
+            value={adminSecret}
+            onChange={(event) => {
+              setAdminSecret(event.target.value);
+              setEnrollments([]);
+              setAdminStatus("");
+              setAdminError("");
+            }}
+            placeholder="Configured on the backend"
+            autoComplete="new-password"
+            disabled={isSubmitting || isLoadingEnrollments || Boolean(deletingUserId)}
           />
         </label>
         <div className="stitch-enrollment-select">
@@ -612,7 +702,7 @@ export default function BatchEnrollment({
           className="stitch-button stitch-button-primary"
           type="button"
           onClick={() => void submitEnrollment()}
-          disabled={!backendOnline || isSubmitting || hasPendingPreparation || readyCount < 2}
+          disabled={!backendOnline || isSubmitting || !adminSecret.trim() || hasPendingPreparation || readyCount < 2}
         >
           {isSubmitting ? "Processing enrollment…" : "Create face template"}
         </button>
@@ -638,6 +728,45 @@ export default function BatchEnrollment({
           </span>
         </div>
       )}
+
+      <section className="stitch-admin-enrollments" aria-labelledby="admin-enrollments-title">
+        <div className="stitch-admin-heading">
+          <div>
+            <h3 id="admin-enrollments-title">Enrollment management</h3>
+            <p>Authenticated admin access · template vectors are never displayed</p>
+          </div>
+          <button
+            className="stitch-button stitch-button-secondary"
+            type="button"
+            onClick={() => void loadEnrollments()}
+            disabled={!backendOnline || !adminSecret.trim() || isLoadingEnrollments || Boolean(deletingUserId)}
+          >
+            {isLoadingEnrollments ? "Loading…" : "Load enrolled users"}
+          </button>
+        </div>
+        {adminStatus && <p className="stitch-admin-status" role="status">{adminStatus}</p>}
+        {adminError && <p className="stitch-admin-error" role="alert">{adminError}</p>}
+        {enrollments.length > 0 && (
+          <ul className="stitch-admin-list">
+            {enrollments.map((entry) => (
+              <li key={entry.user_id}>
+                <span>
+                  <strong>{entry.user_id}</strong>
+                  <small>{entry.template_count} face {entry.template_count === 1 ? "template" : "templates"}</small>
+                </span>
+                <button
+                  className="stitch-button stitch-button-danger"
+                  type="button"
+                  onClick={() => void deleteEnrollment(entry.user_id)}
+                  disabled={Boolean(deletingUserId)}
+                >
+                  {deletingUserId === entry.user_id ? "Deleting…" : "Delete"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </section>
   );
 }

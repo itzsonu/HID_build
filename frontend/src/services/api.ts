@@ -80,6 +80,20 @@ export interface BatchFaceRegistrationResponse {
   message: string;
 }
 
+export interface EnrollmentSummary {
+  user_id: string;
+  template_count: number;
+}
+
+export interface EnrollmentListResponse {
+  enrollments: EnrollmentSummary[];
+}
+
+export interface EnrollmentDeleteResponse {
+  deleted: boolean;
+  user_id: string;
+}
+
 export interface FaceVerificationResponse {
   success: boolean;
   user_id: string;
@@ -131,10 +145,11 @@ function getErrorMessage(payload: unknown, status: number): string {
 async function requestJson<T>(
   path: string,
   options: {
-    method?: "GET" | "POST";
+    method?: "GET" | "POST" | "DELETE";
     body?: unknown;
     signal?: AbortSignal;
     timeoutMs?: number;
+    headers?: Record<string, string>;
   } = {},
 ): Promise<T> {
   const controller = new AbortController();
@@ -150,7 +165,10 @@ async function requestJson<T>(
   try {
     const response = await fetch(`${API_BASE_URL}${path}`, {
       method: options.method ?? "GET",
-      headers: options.body ? { "Content-Type": "application/json" } : undefined,
+      headers: {
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...options.headers,
+      },
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal,
     });
@@ -236,12 +254,14 @@ export function registerFace(
   userId: string,
   imageBase64: string,
   consent: boolean,
+  adminSecret: string,
   signal?: AbortSignal,
 ): Promise<FaceRegistrationResponse> {
   return requestJson<FaceRegistrationResponse>("/api/auth/register", {
     method: "POST",
     body: { user_id: userId, consent, image_base64: imageBase64 },
     signal,
+    headers: { Authorization: `Bearer ${adminSecret}` },
   });
 }
 
@@ -249,6 +269,7 @@ export function registerFacesBatch(
   userId: string,
   imagesBase64: string[],
   consent: boolean,
+  adminSecret: string,
   signal?: AbortSignal,
 ): Promise<BatchFaceRegistrationResponse> {
   return requestJson<BatchFaceRegistrationResponse>("/api/auth/register/batch", {
@@ -260,6 +281,26 @@ export function registerFacesBatch(
     },
     signal,
     timeoutMs: 60_000,
+    headers: { Authorization: `Bearer ${adminSecret}` },
+  });
+}
+
+export function getAdminEnrollments(
+  adminSecret: string,
+): Promise<EnrollmentListResponse> {
+  return requestJson<EnrollmentListResponse>("/api/admin/enrollments", {
+    headers: { Authorization: `Bearer ${adminSecret}` },
+  });
+}
+
+export function deleteAdminEnrollment(
+  userId: string,
+  adminSecret: string,
+): Promise<EnrollmentDeleteResponse> {
+  return requestJson<EnrollmentDeleteResponse>("/api/admin/enrollments", {
+    method: "DELETE",
+    body: { user_id: userId },
+    headers: { Authorization: `Bearer ${adminSecret}` },
   });
 }
 

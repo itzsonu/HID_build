@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 from typing import Final
 
+from pydantic import SecretStr
+
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -23,6 +25,11 @@ class Settings:
     OFFLINE_EVENTS_DB_PATH: Final[str] = os.getenv(
         "OFFLINE_EVENTS_DB_PATH",
         str(BACKEND_DIR / "data" / "offline_events.sqlite3"),
+    )
+    ADMIN_SECRET: Final[SecretStr | None] = (
+        SecretStr(os.environ["ADMIN_SECRET"])
+        if os.getenv("ADMIN_SECRET")
+        else None
     )
     ALLOWED_ORIGINS: Final[list[str]] = [
         origin.strip()

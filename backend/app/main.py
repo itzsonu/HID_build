@@ -6,7 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import access, auth, face, health, liveness
+from app.api.routes import access, admin, auth, face, health, liveness
 from app.core.config import settings
 from app.schemas.face_detection import ImageTooLargeError
 from app.schemas.liveness import LivenessPayloadTooLargeError
@@ -46,6 +46,7 @@ app.include_router(face.router, prefix="/api/face")
 app.include_router(liveness.router, prefix="/api/liveness")
 app.include_router(auth.router, prefix="/api/auth")
 app.include_router(access.router, prefix="/api/access")
+app.include_router(admin.router, prefix="/api/admin")
 
 
 @app.exception_handler(RequestValidationError)

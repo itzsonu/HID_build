@@ -2,7 +2,7 @@
 
 ## Contract status
 
-`GET /api/health`, `POST /api/face/detect`, `POST /api/liveness/challenge`, `POST /api/liveness/check`, `POST /api/auth/register`, `POST /api/auth/register/batch`, `POST /api/auth/verify`, and `POST /api/access/decision` are implemented. Access decisions are experimental and do not control a physical door.
+`GET /api/health`, `POST /api/face/detect`, `POST /api/liveness/challenge`, `POST /api/liveness/check`, `POST /api/auth/register`, `POST /api/auth/register/batch`, `POST /api/auth/verify`, `POST /api/access/decision`, and authenticated `GET`/`DELETE /api/admin/enrollments` are implemented. Access decisions are experimental and do not control a physical door.
 
 The API is version `0.1.0` today. Health, face-detection, liveness, face-authentication, and access-decision request/response models are implemented. JSON endpoints use `Content-Type: application/json`.
 
@@ -126,7 +126,7 @@ Example response:
       "height": 0.42
     }
   ],
-  "processing_time_ms": 42,
+  "processing_time_ms": "<backend-measured-milliseconds>",
   "message": "Face detected."
 }
 ```
@@ -224,17 +224,17 @@ Example response:
 {
   "success": true,
   "challenge_id": "4Uh...random-token...",
-  "liveness_status": "LIVE",
-  "confidence": 0.83,
+  "liveness_status": "UNCERTAIN",
+  "confidence": "<backend-computed-score>",
   "movement_detected": true,
   "valid_frame_count": 5,
   "total_frame_count": 5,
-  "processing_time_ms": 78.4,
-  "message": "Requested leftward movement met the experimental heuristic; this is not proof of liveness."
+  "processing_time_ms": "<backend-measured-milliseconds>",
+  "message": "Movement alone cannot establish liveness; no tested presentation-attack detection model is configured."
 }
 ```
 
-The numeric confidence and processing time above are illustrative. `confidence` is an uncalibrated challenge-evidence score, not a probability that the subject is live. A completed evaluation may return `LIVE`, `UNCERTAIN`, or `SPOOF_SUSPECTED`; `success: true` means evaluation completed, not that liveness was established.
+The angle-bracketed fields above are documentation placeholders, not literal API values. The configured movement analyzer returns `UNCERTAIN` for observed movement because it cannot distinguish a person from a replay. `confidence` is an uncalibrated challenge-evidence score, not a probability that the subject is live; `success: true` means evaluation completed, not that liveness was established.
 
 ### Movement heuristic
 
@@ -270,6 +270,7 @@ This is an experimental movement heuristic, not a reliable anti-spoof system or 
 
 - **Method and path:** `POST /api/auth/register`
 - **Purpose:** Enroll one face for a caller-supplied user ID. Enrollment does not authenticate the person or assess liveness.
+- **Authorization:** Requires `Authorization: Bearer <ADMIN_SECRET>`. Missing/invalid credentials return `401`; an unset server secret disables enrollment with `503`.
 - **Request format:** JSON.
 - **Required fields:**
   - `user_id`: non-empty ID, up to 128 characters; surrounding whitespace is removed.
@@ -282,7 +283,7 @@ Example request:
 
 ```json
 {
-  "user_id": "person-12345",
+  "user_id": "<enrolled-user-id>",
   "consent": true,
   "image_base64": "<base64-encoded-JPEG-bytes>"
 }
@@ -294,8 +295,8 @@ Success response: HTTP `201`.
 {
   "success": true,
   "registered": true,
-  "user_id": "person-12345",
-  "processing_time_ms": 48.0,
+  "user_id": "<enrolled-user-id>",
+  "processing_time_ms": "<backend-measured-milliseconds>",
   "message": "Face enrollment completed. Identity was not verified."
 }
 ```
@@ -311,19 +312,20 @@ Consent is an explicit API confirmation, not a legal-consent workflow or proof o
 **Status: Implemented — consent-gated multi-photo enrollment**
 
 - **Method and path:** `POST /api/auth/register/batch`
-- **Purpose:** Process multiple reference photos once, deduplicate near-identical embeddings, and create or update one normalized SFace template for the supplied user ID. This endpoint enrolls a template only; it does not assess liveness, verify identity, or make an access decision.
+- **Purpose:** Process multiple reference photos once, deduplicate near-identical embeddings, and create or update a set of normalized SFace templates for the supplied user ID. This endpoint enrolls templates only; it does not assess liveness, verify identity, or make an access decision.
+- **Authorization:** Requires `Authorization: Bearer <ADMIN_SECRET>`. Missing/invalid credentials return `401`; an unset server secret disables enrollment with `503`.
 - **Required fields:**
   - `user_id`: non-empty ID, up to 128 characters.
   - `consent`: required boolean; it must be `true`.
   - `images_base64`: 2–10 Base64 JPEG strings, without data-URL prefixes.
 - **Limits:** Each decoded JPEG is limited to 5 MiB and the combined Base64 data to 20 MiB. The server requires exactly one detected face per accepted photo. Its basic quality gate rejects images under 96 pixels on either edge, mean grayscale brightness outside 15–240, or Laplacian sharpness variance below 5. These are uncalibrated technical filters, not guarantees of a usable biometric sample. At least two distinct, usable photos must remain before the stored template is changed.
-- **Storage:** The backend normalizes each accepted embedding, deduplicates embeddings with cosine similarity at or above `0.995`, averages the remaining embeddings, then normalizes the aggregate. An existing user template is updated; otherwise a new template is created. Original images are not stored.
+- **Storage:** The backend normalizes and stores one 128-dimensional float32 embedding per accepted distinct photo. Within a batch, it rejects exact SHA-256 duplicates before inference and near-duplicate embeddings with cosine similarity at or above `0.995`. The backend stores per-photo embeddings and hashes, not the uploaded photos. Re-enrollment atomically replaces that person's template set.
 
 Example request (abbreviated values):
 
 ```json
 {
-  "user_id": "person-12345",
+  "user_id": "<enrolled-user-id>",
   "consent": true,
   "images_base64": [
     "<photo-1-base64-JPEG>",
@@ -340,7 +342,7 @@ Example response:
   "success": true,
   "registered": true,
   "updated": false,
-  "user_id": "person-12345",
+  "user_id": "<enrolled-user-id>",
   "photo_results": [
     {
       "photo_index": 1,
@@ -361,14 +363,40 @@ Example response:
   "accepted_photo_count": 2,
   "rejected_photo_count": 0,
   "duplicate_photo_count": 1,
-  "processing_time_ms": 52.1,
+  "processing_time_ms": "<backend-measured-milliseconds>",
   "message": "The face template was created from the accepted reference photos. No access was granted."
 }
 ```
 
-The sample response is illustrative; actual enrollment requires at least two accepted photos, and `processing_time_ms` is measured by the backend. `photo_results` reports each input as `ACCEPTED`, `REJECTED`, or `DUPLICATE`. A well-formed batch can return `success: true` and `registered: false` when too few distinct usable photos remain; in that case the stored template is unchanged. The frontend keeps accepted photos temporarily to allow adding more references and retrying.
+The sample response is illustrative; actual enrollment requires at least two accepted photos, and `processing_time_ms` is measured by the backend. `photo_results` reports each input as `ACCEPTED`, `REJECTED`, or `DUPLICATE`. A well-formed batch can return `success: true` and `registered: false` when too few distinct usable photos remain; in that case the stored templates are unchanged. The frontend clears submitted image data after each request and requires users to reselect photos before retrying.
 
 Possible errors: `403` consent is false; `413` image or aggregate payload exceeds its limit; `422` wrong count, malformed Base64, non-JPEG data, or invalid request fields; `503` the model or SQLite store is unavailable. Per-photo face-count, decoding, and quality failures are included in `photo_results`.
+
+## 5.2 Authenticated enrollment management
+
+The admin API requires the server-configured `ADMIN_SECRET` on every request. Send it as `Authorization: Bearer <secret>`; the secret has no default, and an unset secret causes these routes and enrollment routes to return `503`. The frontend accepts it in a password field for the current browser session and does not persist it.
+
+### List enrolled users
+
+- **Method and path:** `GET /api/admin/enrollments`
+- **Response:** user IDs and template counts only; no embeddings or images.
+
+```json
+{
+  "enrollments": [
+    { "user_id": "<enrolled-user-id>", "template_count": 3 }
+  ]
+}
+```
+
+### Delete one user's enrollment
+
+- **Method and path:** `DELETE /api/admin/enrollments`
+- **Request:** `{"user_id": "<enrolled-user-id>"}`
+- **Success response:** `{"deleted": true, "user_id": "<enrolled-user-id>"}`
+- **Errors:** `401` invalid/missing secret, `404` user not found, `503` secret not configured or database unavailable, `422` invalid user ID.
+
+The default SQLite file is `backend/data/face_embeddings.sqlite3`; `BIOMETRIC_DB_PATH` overrides it. On first open, the migration creates `face_templates` and backfills each existing `face_embeddings` aggregate vector as one template with a `NULL` photo hash. It leaves the old aggregate row and all existing enrollments intact. New batch enrollments store each accepted per-photo vector in `face_templates`; the old `face_embeddings` row is retained as a normalized aggregate for legacy schema compatibility. Current single-user and automatic verification read from `face_templates`. Deleting a user removes both the per-photo templates and the compatibility row.
 
 ## 6. Face verification
 
@@ -384,7 +412,7 @@ Example request:
 
 ```json
 {
-  "user_id": "person-12345",
+  "user_id": "<enrolled-user-id>",
   "image_base64": "<base64-encoded-JPEG-bytes>"
 }
 ```
@@ -394,11 +422,11 @@ Example response:
 ```json
 {
   "success": true,
-  "user_id": "person-12345",
+  "user_id": "<enrolled-user-id>",
   "identity_status": "VERIFIED",
-  "similarity": 0.71,
+  "similarity": "<backend-computed-cosine-score>",
   "threshold": 0.363,
-  "processing_time_ms": 45.0,
+  "processing_time_ms": "<backend-measured-milliseconds>",
   "message": "The face matched the enrolled representation."
 }
 ```
@@ -414,17 +442,15 @@ The recognition stage uses OpenCV Zoo's pretrained **SFace** ONNX model (`face_r
 - Model source: [OpenCV Zoo SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) and [OpenCV Zoo YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet).
 - Local model files and license notices are in `backend/models/`; the SFace model is approximately 36.9 MiB. SFace is distributed under Apache-2.0 and YuNet under MIT; see [`SFACE-LICENSE.txt`](../backend/models/SFACE-LICENSE.txt) and [`YUNET-LICENSE.txt`](../backend/models/YUNET-LICENSE.txt).
 - The default cosine threshold is **0.363**, configurable through `FACE_MATCH_THRESHOLD`. This is the threshold used by OpenCV Zoo's SFace demo; it is an uncalibrated starting point, not an accuracy or security guarantee. Do not lower it to force a match.
-- SQLite stores the user ID, a 512-byte little-endian float32 embedding, and server timestamps at `backend/data/face_embeddings.sqlite3` by default. `BIOMETRIC_DB_PATH` can override the file location. The directory is ignored by Git.
-- Original images are processed transiently and are not stored. Embeddings are sensitive biometric data; this local SQLite prototype does not encrypt the database or provide authentication/authorization.
-
-No DELETE API is implemented. For this local prototype, stop the backend and remove the database file to delete all enrollments. Add authenticated per-user deletion and retention controls before broader use.
+- SQLite stores each 128-dimensional normalized float32 embedding as a 512-byte little-endian BLOB in `face_templates`, associated with its user ID and a SHA-256 reference-photo digest. The default database path is `backend/data/face_embeddings.sqlite3`; `BIOMETRIC_DB_PATH` overrides it. The legacy `face_embeddings` table remains as a compatibility aggregate for single-user verification.
+- Original images are processed transiently and are not stored. Embeddings are sensitive biometric data; this local SQLite prototype does not encrypt the database.
 
 ## 7. Campus access decision
 
 **Status: Implemented — prototype policy**
 
 - **Method and path:** `POST /api/access/decision`
-- **Purpose:** Consume a server-issued movement challenge, assess its ordered frames, compare the last Haar-valid frame with the enrolled user's SFace representation, evaluate the configured campus schedule, and calculate one access decision.
+- **Purpose:** Consume a server-issued movement challenge, assess its ordered frames, compare the liveness-selected camera frame with enrolled SFace templates, evaluate the configured campus schedule, and calculate one access decision.
 - **Request format:** JSON; `extra="forbid"` means client-supplied statuses, schedule results, confidence, or decisions are rejected.
 - **Required fields:**
   - `challenge_id`: ID returned by `POST /api/liveness/challenge`.
@@ -449,24 +475,24 @@ Example request:
 }
 ```
 
-Example response (timing is illustrative):
+Response shape (angle-bracketed fields are placeholders, not measured or literal response values):
 
 ```json
 {
   "success": true,
-  "decision": "ALLOW",
-  "challenge_id": "server-issued-challenge-id",
-  "liveness_status": "LIVE",
-  "identity_status": "VERIFIED",
-  "matched_user_id": "person-12345",
-  "schedule_status": "WITHIN_SCHEDULE",
-  "identity_message": "The face matched one enrolled representation.",
-  "reason": "Identity and liveness verified; access is permitted by the configured campus schedule.",
-  "requires_step_up": false,
-  "movement_detected": true,
-  "valid_frame_count": 8,
-  "total_frame_count": 10,
-  "processing_time_ms": 83.2
+  "decision": "STEP_UP_VERIFICATION",
+  "challenge_id": "<server-issued-challenge-id>",
+  "liveness_status": "UNCERTAIN",
+  "identity_status": "<backend-calculated-identity-status>",
+  "matched_user_id": "<backend-matched-user-id-or-null>",
+  "schedule_status": "<backend-calculated-schedule-status>",
+  "identity_message": "<backend-provided identity result>",
+  "reason": "Movement alone cannot establish liveness; step-up verification is required.",
+  "requires_step_up": true,
+  "movement_detected": "<backend-calculated-boolean>",
+  "valid_frame_count": "<backend-count>",
+  "total_frame_count": "<submitted-frame-count>",
+  "processing_time_ms": "<backend-measured-milliseconds>"
 }
 ```
 
@@ -476,7 +502,7 @@ Example response (timing is illustrative):
 
 | Liveness | Identity | Schedule | Decision |
 | --- | --- | --- | --- |
-| `LIVE` | `VERIFIED` | `WITHIN_SCHEDULE` | `ALLOW` |
+| `LIVE` | `VERIFIED` | `WITHIN_SCHEDULE` | `STEP_UP_VERIFICATION` until a tested presentation-attack detector is integrated |
 | `LIVE` | `VERIFIED` | `OUTSIDE_SCHEDULE` | `STEP_UP_VERIFICATION` |
 | `LIVE` | `VERIFIED` | `UNAVAILABLE` | `STEP_UP_VERIFICATION` |
 | `UNCERTAIN` | `VERIFIED` or `NOT_CHECKED` | Any | `STEP_UP_VERIFICATION` |
@@ -485,7 +511,7 @@ Example response (timing is illustrative):
 | Any, including `UNCERTAIN` | `NOT_VERIFIED` | Any | `DENY` |
 | `LIVE` | `NOT_CHECKED` | Any | `DENY` |
 
-A failed liveness assessment or confirmed identity mismatch is denied before schedule evaluation can grant access. A movement challenge classified as uncertain can request step-up only when identity was not positively mismatched.
+A tested presentation-attack detector is not currently configured. The movement analyzer cannot establish live presence; consequently, this prototype has no path to `ALLOW`, even if identity and schedule pass or an upstream component reports `LIVE`. A future `ALLOW` implementation requires independently tested liveness, a unique identity match, and an allowed schedule. A confirmed identity mismatch is denied.
 
 `STEP_UP_VERIFICATION` sets `requires_step_up: true`; it requests another approved verification method and is **not** an access grant. `DENY` is not a successful unlock. No physical door controller is connected.
 
@@ -495,7 +521,11 @@ The default JSON schedule is `backend/config/campus_schedule.json`; set `CAMPUS_
 
 The included weekday hours and dated exceptions are **demonstration timings only, not verified PES University or other campus policy**. Replace them with timings approved by the campus. Missing, invalid, unreadable, or timezone-unresolvable configuration produces `schedule_status: UNAVAILABLE`, which can never yield `ALLOW`. `tzdata` supplies IANA timezone data on Windows.
 
-Automatic matching compares against the precomputed templates in the local database. No match is `NOT_VERIFIED` and is denied; multiple matches at the configured SFace threshold are `AMBIGUOUS` and require step-up. A single reference photo or enrollment request cannot call this access endpoint: a new, unexpired one-time challenge and the ordered frame sequence are required. The movement heuristic can be replayed and is not proof of liveness; do not claim that reference photos, prerecorded videos, or other presentation attacks are reliably rejected.
+Automatic matching extracts a normalized live-frame embedding and compares it against stored embeddings using vectorized cosine similarity. For each person, the rule is the maximum sample-level similarity across that person's templates. Exactly one person must meet the configured threshold; no qualifying person is `NOT_VERIFIED` and denied, while multiple qualifying people are `AMBIGUOUS` and require step-up. The configured default threshold `0.363` is an uncalibrated OpenCV Zoo demo value, not a calibrated identity threshold. A single reference photo or enrollment request cannot call this access endpoint: a new, unexpired one-time challenge and the ordered live-camera frame sequence are required. The movement heuristic can be replayed and is not proof of liveness; do not claim that reference photos, prerecorded videos, or other presentation attacks are reliably rejected.
+
+### Timing and benchmark status
+
+The browser reports capture duration separately from browser API round-trip time; the backend's `processing_time_ms` is a third, separate measurement. No consenting real-participant benchmark has been run on a named test machine/network, so the 1.5-second post-capture API target is **not measured or confirmed**. Unit tests and synthetic frames do not establish that target.
 
 This prototype has no individual student/staff role permissions or per-user schedule rules. Schedule compliance is only one part of a policy and is not authorization by itself.
 
@@ -507,5 +537,5 @@ Possible errors: `404` unknown challenge, `409` used challenge, `410` expired ch
 - Keep liveness and identity evaluation separate; neither result substitutes for the other.
 - Do not log raw frames, base64 image payloads, embeddings, or biometric-derived secrets.
 - Use HTTPS outside local development; apply authorization, rate limits, payload limits, and retention/deletion controls before production.
-- Do not treat confidence as calibrated accuracy or advertise unsupported attack resistance.
-- The backend has no caller authentication/authorization, encrypted biometric storage, per-user deletion, individual student/staff role permissions, or production privacy controls. Step-up is not an access grant, and no physical door controller is connected.
+- Do not treat confidence or similarity as calibrated accuracy or advertise unsupported attack resistance.
+- Admin enrollment and management routes require a server-configured secret. The backend does not encrypt biometric storage or implement individual student/staff role permissions or production privacy controls. Step-up is not an access grant, and no physical door controller is connected.

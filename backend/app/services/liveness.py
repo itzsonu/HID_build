@@ -166,7 +166,7 @@ class MovementAnalyzer:
                 False,
                 len(centers_x),
                 total_frames,
-                "Too few frames contained exactly one detectable face.",
+                "Liveness is uncertain because too few frames contained exactly one detectable face; no tested presentation-attack detection model is configured.",
                 last_valid_frame_index,
             )
 
@@ -198,7 +198,7 @@ class MovementAnalyzer:
                 movement_detected,
                 len(centers_x),
                 total_frames,
-                "The requested movement was not observed; the challenge failed. This does not prove a spoof.",
+                "The requested movement was not observed; the challenge failed. This does not prove a spoof, and no tested presentation-attack detection model is configured.",
                 last_valid_frame_index,
             )
         if movement_detected and consistency >= self.consistency_threshold:
@@ -208,7 +208,7 @@ class MovementAnalyzer:
                 True,
                 len(centers_x),
                 total_frames,
-                "Requested movement was observed, but movement alone cannot distinguish a live person from a video replay; additional approved verification is required.",
+                "Requested movement was observed, but movement alone cannot distinguish a live person from a video replay. No tested presentation-attack detection model is configured; additional approved verification is required.",
                 last_valid_frame_index,
             )
         return self._result(
@@ -217,7 +217,7 @@ class MovementAnalyzer:
             movement_detected,
             len(centers_x),
             total_frames,
-            "Movement evidence was insufficient or inconsistent.",
+            "Movement evidence was insufficient or inconsistent, and no tested presentation-attack detection model is configured.",
             last_valid_frame_index,
         )
 

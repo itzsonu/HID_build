@@ -6,8 +6,11 @@ import cv2
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
+from app.api.routes import admin as admin_routes
 from app.api.routes import auth as auth_routes
+from app.core.config import settings
 from app.main import app
 from app.schemas.auth import IdentityStatus
 from app.services.face_recognition import (
@@ -19,13 +22,23 @@ from app.services.face_recognition import (
 from app.services.face_authentication import identify_enrolled_face
 from app.services.face_store import SQLiteFaceStore
 
-client = TestClient(app)
+ADMIN_SECRET = "unit-test-admin-secret"
+client = TestClient(
+    app,
+    headers={"Authorization": f"Bearer {ADMIN_SECRET}"},
+)
+
+
+@pytest.fixture(autouse=True)
+def configured_admin_secret(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ADMIN_SECRET", SecretStr(ADMIN_SECRET))
 
 
 @pytest.fixture
 def isolated_store(monkeypatch, tmp_path: Path) -> SQLiteFaceStore:
     store = SQLiteFaceStore(tmp_path / "faces.sqlite3")
     monkeypatch.setattr(auth_routes, "face_store", store)
+    monkeypatch.setattr(admin_routes, "face_store", store)
     return store
 
 
@@ -157,6 +170,78 @@ def test_mocked_enrollment_stores_only_embedding_and_consent_time(
     assert len(stored[0]) == 128 * 4
     assert stored[1]
     assert image not in isolated_store.database_path.read_bytes()
+
+
+def test_admin_enrollment_routes_fail_closed_without_configured_secret(
+    monkeypatch, isolated_store
+) -> None:
+    monkeypatch.setattr(settings, "ADMIN_SECRET", None)
+    response = client.get("/api/admin/enrollments")
+
+    assert response.status_code == 503
+    assert "configure ADMIN_SECRET" in response.json()["detail"]
+
+
+def test_admin_enrollment_routes_reject_invalid_secret(isolated_store) -> None:
+    response = client.get(
+        "/api/admin/enrollments",
+        headers={"Authorization": "Bearer incorrect"},
+    )
+
+    assert response.status_code == 401
+    assert "enrollments" not in response.json()
+
+
+def test_admin_can_list_template_counts_and_delete_user(isolated_store) -> None:
+    isolated_store.upsert_templates(
+        "user-one",
+        [unit_vector(0), unit_vector(1)],
+        ["0" * 64, "1" * 64],
+    )
+    isolated_store.upsert_template("user-two", unit_vector(2))
+
+    listed = client.get("/api/admin/enrollments")
+
+    assert listed.status_code == 200
+    assert listed.json() == {
+        "enrollments": [
+            {"user_id": "user-one", "template_count": 2},
+            {"user_id": "user-two", "template_count": 1},
+        ]
+    }
+    assert "embedding" not in listed.text
+
+    deleted = client.request(
+        "DELETE",
+        "/api/admin/enrollments",
+        json={"user_id": "user-one"},
+    )
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "user_id": "user-one"}
+    assert isolated_store.get_templates("user-one") == []
+    assert isolated_store.get_embedding("user-one") is None
+
+    missing = client.request(
+        "DELETE",
+        "/api/admin/enrollments",
+        json={"user_id": "missing"},
+    )
+    assert missing.status_code == 404
+
+
+def test_single_and_batch_enrollment_require_admin_secret(
+    monkeypatch, isolated_store
+) -> None:
+    monkeypatch.setattr(settings, "ADMIN_SECRET", None)
+    single = client.post("/api/auth/register", json=registration_payload())
+    batch = client.post(
+        "/api/auth/register/batch",
+        json=batch_registration_payload(),
+    )
+
+    assert single.status_code == 503
+    assert batch.status_code == 503
 
 
 def test_consent_false_rejects_enrollment_before_model_inference(
@@ -304,7 +389,7 @@ def test_mocked_enrollment_persists_across_store_instances(
     )
 
 
-def test_batch_enrollment_deduplicates_and_persists_only_one_template(
+def test_batch_enrollment_deduplicates_and_persists_each_distinct_template(
     monkeypatch, isolated_store
 ) -> None:
     images = [jpeg_bytes(90), jpeg_bytes(150), jpeg_bytes(210)]
@@ -335,8 +420,79 @@ def test_batch_enrollment_deduplicates_and_persists_only_one_template(
     assert all(require_quality for _, require_quality in submitted)
     persisted = SQLiteFaceStore(isolated_store.database_path).get_all_embeddings()
     assert [user_id for user_id, _ in persisted] == ["demo-user"]
+    templates = SQLiteFaceStore(isolated_store.database_path).get_templates("demo-user")
+    assert len(templates) == 2
+    assert all(len(template) == 128 * 4 for template in templates)
     database_bytes = isolated_store.database_path.read_bytes()
     assert all(image not in database_bytes for image in images)
+
+
+def test_exact_duplicate_reference_is_not_inferred_or_stored(
+    monkeypatch, isolated_store
+) -> None:
+    repeated = jpeg_bytes(90)
+    images = [repeated, repeated, jpeg_bytes(150)]
+    submitted = set_mock_batch_embeddings(
+        monkeypatch,
+        [unit_vector(0), unit_vector(1)],
+    )
+
+    response = client.post(
+        "/api/auth/register/batch",
+        json=batch_registration_payload(images),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["registered"] is True
+    assert response.json()["duplicate_photo_count"] == 1
+    assert [item["status"] for item in response.json()["photo_results"]] == [
+        "ACCEPTED",
+        "DUPLICATE",
+        "ACCEPTED",
+    ]
+    assert [image for image, _ in submitted] == [repeated, images[2]]
+    assert len(isolated_store.get_templates("demo-user")) == 2
+
+
+def test_existing_aggregate_template_migrates_without_deletion(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy.sqlite3"
+    embedding = unit_vector(11).astype("<f4").tobytes()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE face_embeddings (
+                user_id TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL CHECK(length(embedding) = 512),
+                consented_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO face_embeddings
+                (user_id, embedding, consented_at, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("legacy-user", embedding, "consented", "created"),
+        )
+
+    store = SQLiteFaceStore(database_path)
+    migrated = store.get_templates("legacy-user")
+    with sqlite3.connect(database_path) as connection:
+        legacy_row = connection.execute(
+            "SELECT embedding, consented_at FROM face_embeddings WHERE user_id = ?",
+            ("legacy-user",),
+        ).fetchone()
+        template_row = connection.execute(
+            "SELECT photo_sha256 FROM face_templates WHERE user_id = ?",
+            ("legacy-user",),
+        ).fetchone()
+
+    assert migrated == [embedding]
+    assert legacy_row == (embedding, "consented")
+    assert template_row == (None,)
+    assert store.get_templates("legacy-user") == [embedding]
 
 
 def test_batch_enrollment_requires_consent_before_inference(
@@ -471,8 +627,12 @@ def test_automatic_identity_lookup_handles_unique_missing_and_ambiguous_matches(
             self.quality_checks.append(require_quality)
             return self.vector
 
-    isolated_store.upsert_template("user-one", unit_vector(0))
-    unique_service = MockEmbeddingService(unit_vector(0))
+    isolated_store.upsert_templates(
+        "user-one",
+        [unit_vector(0), unit_vector(3)],
+        ["0" * 64, "1" * 64],
+    )
+    unique_service = MockEmbeddingService(unit_vector(3))
     unique = identify_enrolled_face(
         b"current-frame",
         isolated_store,
@@ -491,7 +651,7 @@ def test_automatic_identity_lookup_handles_unique_missing_and_ambiguous_matches(
     assert no_match.identity_status is IdentityStatus.NOT_VERIFIED
     assert no_match.matched_user_id is None
 
-    isolated_store.upsert_template("user-two", unit_vector(0))
+    isolated_store.upsert_template("user-two", unit_vector(3))
     ambiguous = identify_enrolled_face(
         b"current-frame",
         isolated_store,

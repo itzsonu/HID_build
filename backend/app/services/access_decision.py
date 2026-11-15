@@ -31,34 +31,20 @@ def decide_access(
             AccessDecision.STEP_UP_VERIFICATION,
             "More than one enrolled identity matched; an additional approved verification step is required.",
         )
-    if liveness_status is LivenessStatus.UNCERTAIN:
-        return AccessPolicyResult(
-            AccessDecision.STEP_UP_VERIFICATION,
-            "Liveness evidence is uncertain; an additional approved verification step is required.",
-        )
     if identity_status is IdentityStatus.NOT_CHECKED:
         return AccessPolicyResult(
             AccessDecision.DENY,
             "Identity could not be checked; access is denied.",
         )
+    if liveness_status is LivenessStatus.UNCERTAIN:
+        return AccessPolicyResult(
+            AccessDecision.STEP_UP_VERIFICATION,
+            "Liveness is uncertain; no tested presentation-attack detection model is configured. An additional approved verification step is required.",
+        )
     if identity_status is not IdentityStatus.VERIFIED:
         return AccessPolicyResult(
             AccessDecision.DENY,
             "Identity status was unavailable; access is denied.",
-        )
-    if liveness_status is not LivenessStatus.LIVE:
-        return AccessPolicyResult(
-            AccessDecision.STEP_UP_VERIFICATION,
-            "Liveness status was unavailable; additional verification is required.",
-        )
-    if (
-        liveness_status is LivenessStatus.LIVE
-        and identity_status is IdentityStatus.VERIFIED
-        and schedule_status is ScheduleStatus.WITHIN_SCHEDULE
-    ):
-        return AccessPolicyResult(
-            AccessDecision.ALLOW,
-            "Identity and liveness verified; access is permitted by the configured campus schedule.",
         )
     if schedule_status is ScheduleStatus.UNAVAILABLE:
         return AccessPolicyResult(
@@ -68,9 +54,14 @@ def decide_access(
     if schedule_status is ScheduleStatus.OUTSIDE_SCHEDULE:
         return AccessPolicyResult(
             AccessDecision.STEP_UP_VERIFICATION,
-            "Identity and liveness checks passed, but the campus schedule does not permit access now.",
+            "The campus schedule does not permit access now; access is not granted.",
+        )
+    if liveness_status in (LivenessStatus.LIVE, LivenessStatus.UNCERTAIN):
+        return AccessPolicyResult(
+            AccessDecision.STEP_UP_VERIFICATION,
+            "A tested presentation-attack detection model is not configured. Movement evidence cannot establish liveness; additional approved verification is required.",
         )
     return AccessPolicyResult(
         AccessDecision.STEP_UP_VERIFICATION,
-        "Campus schedule status was unavailable; additional verification is required.",
+        "Liveness could not be established by a tested presentation-attack detection model; access is not granted.",
     )

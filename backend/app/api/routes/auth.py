@@ -1,9 +1,10 @@
 import hashlib
 from time import perf_counter
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 import numpy as np
 
+from app.api.admin_auth import require_admin
 from app.schemas.auth import (
     BatchFaceRegistrationRequest,
     BatchFaceRegistrationResponse,
@@ -40,6 +41,7 @@ router = APIRouter()
     "/register/batch",
     response_model=BatchFaceRegistrationResponse,
     tags=["Face Authentication"],
+    dependencies=[Depends(require_admin)],
 )
 def register_faces_batch(
     request: BatchFaceRegistrationRequest,
@@ -54,6 +56,7 @@ def register_faces_batch(
     photo_results: list[EnrollmentPhotoResult] = []
     accepted_embeddings: list[np.ndarray] = []
     accepted_hashes: set[str] = set()
+    accepted_digests: list[str] = []
 
     for photo_index, image_bytes in enumerate(request.decoded_images(), start=1):
         image_hash = hashlib.sha256(image_bytes).hexdigest()
@@ -112,6 +115,7 @@ def register_faces_batch(
 
         accepted_hashes.add(image_hash)
         accepted_embeddings.append(embedding)
+        accepted_digests.append(image_hash)
         photo_results.append(
             EnrollmentPhotoResult(
                 photo_index=photo_index,
@@ -145,11 +149,12 @@ def register_faces_batch(
             message="At least two distinct usable photos are required; the stored template was not changed.",
         )
 
-    template = normalize_embedding(
-        np.mean(np.stack(accepted_embeddings), axis=0)
-    )
     try:
-        updated = face_store.upsert_template(request.user_id, template)
+        updated = face_store.upsert_templates(
+            request.user_id,
+            accepted_embeddings,
+            accepted_digests,
+        )
     except FaceStoreUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -176,6 +181,7 @@ def register_faces_batch(
     response_model=FaceRegistrationResponse,
     status_code=201,
     tags=["Face Authentication"],
+    dependencies=[Depends(require_admin)],
 )
 def register_face(request: FaceRegistrationRequest) -> FaceRegistrationResponse:
     if not request.consent:
