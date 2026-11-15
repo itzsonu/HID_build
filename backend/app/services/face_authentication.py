@@ -147,3 +147,68 @@ def identify_enrolled_face(
         "The face uniquely matched one enrolled user using the best similarity across that user's templates.",
         matched_user_id,
     )
+
+
+def verify_claimed_user(
+    user_id: str,
+    image_bytes: bytes,
+    store: SQLiteFaceStore,
+    embedding_service: SFaceEmbeddingService,
+) -> FaceIdentityEvaluation:
+    """Verify a claimed ID only when it is the unique best enrolled match."""
+    threshold = embedding_service.threshold
+    templates = store.get_all_templates()
+    enrolled_user_ids = {stored_user_id for stored_user_id, _ in templates}
+    if user_id not in enrolled_user_ids:
+        return FaceIdentityEvaluation(
+            IdentityStatus.NOT_CHECKED,
+            None,
+            threshold,
+            "The entered user ID is not enrolled.",
+        )
+
+    submitted = embedding_service.extract_embedding(image_bytes, require_quality=True)
+    normalized_matrix = _normalized_template_matrix(
+        [stored_embedding for _, stored_embedding in templates]
+    )
+    similarities = normalized_matrix @ normalize_embedding(submitted)
+    best_by_user: dict[str, float] = {}
+    for (stored_user_id, _), similarity in zip(templates, similarities, strict=True):
+        best_by_user[stored_user_id] = max(
+            best_by_user.get(stored_user_id, float("-inf")),
+            float(similarity),
+        )
+
+    target_similarity = best_by_user[user_id]
+    if target_similarity < threshold:
+        return FaceIdentityEvaluation(
+            IdentityStatus.NOT_VERIFIED,
+            target_similarity,
+            threshold,
+            "The face did not meet the configured threshold for the entered user ID.",
+        )
+
+    strongest_other = max(
+        (score for candidate, score in best_by_user.items() if candidate != user_id),
+        default=float("-inf"),
+    )
+    if strongest_other >= target_similarity:
+        status = (
+            IdentityStatus.AMBIGUOUS
+            if strongest_other == target_similarity
+            else IdentityStatus.NOT_VERIFIED
+        )
+        message = (
+            "The face matched another enrolled profile equally; identity is ambiguous."
+            if status is IdentityStatus.AMBIGUOUS
+            else "The face matched another enrolled profile more strongly than the entered user ID."
+        )
+        return FaceIdentityEvaluation(status, target_similarity, threshold, message)
+
+    return FaceIdentityEvaluation(
+        IdentityStatus.VERIFIED,
+        target_similarity,
+        threshold,
+        "The face matched the entered user ID and was the strongest enrolled-profile match.",
+        user_id,
+    )

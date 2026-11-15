@@ -15,7 +15,7 @@ from app.services.campus_schedule import campus_schedule
 from app.services.face_authentication import (
     FaceIdentityEvaluation,
     identify_enrolled_face,
-    verify_enrolled_face,
+    verify_claimed_user,
 )
 from app.services.face_detection import (
     FaceDetectionError,
@@ -131,7 +131,7 @@ def _check_identity(
                 face_store,
                 face_embedding_service,
             )
-        return verify_enrolled_face(
+        return verify_claimed_user(
             user_id,
             image_bytes,
             face_store,

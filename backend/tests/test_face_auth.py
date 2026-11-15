@@ -19,7 +19,7 @@ from app.services.face_recognition import (
     PoorImageQualityError,
     SFaceEmbeddingService,
 )
-from app.services.face_authentication import identify_enrolled_face
+from app.services.face_authentication import identify_enrolled_face, verify_claimed_user
 from app.services.face_store import SQLiteFaceStore
 
 ADMIN_SECRET = "unit-test-admin-secret"
@@ -659,6 +659,49 @@ def test_automatic_identity_lookup_handles_unique_missing_and_ambiguous_matches(
     )
     assert ambiguous.identity_status is IdentityStatus.AMBIGUOUS
     assert ambiguous.matched_user_id is None
+
+
+def test_claimed_identity_must_match_and_be_the_strongest_enrolled_profile(
+    isolated_store,
+) -> None:
+    class MockEmbeddingService:
+        threshold = 0.363
+
+        def __init__(self, vector: np.ndarray) -> None:
+            self.vector = vector
+            self.calls = 0
+
+        def extract_embedding(
+            self,
+            _: bytes,
+            *,
+            require_quality: bool = False,
+        ) -> np.ndarray:
+            assert require_quality is True
+            self.calls += 1
+            return self.vector
+
+    isolated_store.upsert_template("user-one", unit_vector(0))
+    isolated_store.upsert_template("user-two", unit_vector(1))
+
+    correct = verify_claimed_user(
+        "user-one", b"frame", isolated_store, MockEmbeddingService(unit_vector(0))
+    )
+    assert correct.identity_status is IdentityStatus.VERIFIED
+    assert correct.matched_user_id == "user-one"
+
+    wrong = verify_claimed_user(
+        "user-one", b"frame", isolated_store, MockEmbeddingService(unit_vector(1))
+    )
+    assert wrong.identity_status is IdentityStatus.NOT_VERIFIED
+    assert wrong.matched_user_id is None
+
+    missing_service = MockEmbeddingService(unit_vector(0))
+    missing = verify_claimed_user(
+        "unknown", b"frame", isolated_store, missing_service
+    )
+    assert missing.identity_status is IdentityStatus.NOT_CHECKED
+    assert missing_service.calls == 0
 
 
 def test_batch_quality_rejection_is_reported_per_photo(

@@ -20,7 +20,7 @@ from app.services.campus_schedule import (
 )
 from app.services.face_authentication import (
     FaceIdentityEvaluation,
-    verify_enrolled_face,
+    verify_claimed_user,
 )
 from app.services.liveness import (
     InMemoryChallengeStore,
@@ -82,7 +82,7 @@ def access_environment(monkeypatch):
         "evaluate",
         evaluate_liveness,
     )
-    monkeypatch.setattr(access_routes, "verify_enrolled_face", verify_identity)
+    monkeypatch.setattr(access_routes, "verify_claimed_user", verify_identity)
     monkeypatch.setattr(access_routes, "identify_enrolled_face", identify_identity)
     monkeypatch.setattr(
         access_routes.campus_schedule,
@@ -257,7 +257,7 @@ def test_unknown_user_is_denied_without_running_face_inference(
     store, _ = access_environment
     empty_store = SQLiteFaceStore(tmp_path / "empty.sqlite3")
     monkeypatch.setattr(access_routes, "face_store", empty_store)
-    monkeypatch.setattr(access_routes, "verify_enrolled_face", verify_enrolled_face)
+    monkeypatch.setattr(access_routes, "verify_claimed_user", verify_claimed_user)
 
     def inference_must_not_run(_: bytes) -> np.ndarray:
         raise AssertionError("Unknown users must not run face inference.")
