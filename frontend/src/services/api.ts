@@ -231,10 +231,15 @@ export function decideAccess(
   challengeId: string,
   frames: string[],
   signal: AbortSignal,
+  userId?: string,
 ): Promise<AccessDecisionResponse> {
   return requestJson<AccessDecisionResponse>("/api/access/decision", {
     method: "POST",
-    body: { challenge_id: challengeId, frames },
+    body: {
+      challenge_id: challengeId,
+      frames,
+      ...(userId ? { user_id: userId } : {}),
+    },
     signal,
     timeoutMs: 45_000,
   });

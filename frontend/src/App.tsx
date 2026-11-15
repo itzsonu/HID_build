@@ -125,6 +125,7 @@ function App() {
   const [frameProgress, setFrameProgress] = useState(0);
   const [countdown, setCountdown] = useState(0);
   const [result, setResult] = useState<DisplayResult | null>(null);
+  const [claimedUserId, setClaimedUserId] = useState("");
   const [offlineEventCount, setOfflineEventCount] = useState(
     () => loadOfflineEvents().length,
   );
@@ -431,6 +432,7 @@ function App() {
         issuedChallenge.challenge_id,
         frames,
         controller.signal,
+        claimedUserId.trim() || undefined,
       );
       const responseTimeMs = performance.now() - responseStartedAt;
       ensureActive();
@@ -635,6 +637,20 @@ function App() {
               <h3>{instruction}</h3>
             </div>
             <p className="stitch-prompt-help">Keep your face in view and move naturally. The preview is mirrored, so follow the screen-side instruction.</p>
+
+            <label className="stitch-user-id-field">
+              <span>Enrolled user ID <small>optional</small></span>
+              <input
+                type="text"
+                value={claimedUserId}
+                onChange={(event) => setClaimedUserId(event.target.value)}
+                placeholder="Enter your enrolled ID if you know it"
+                autoComplete="off"
+                maxLength={128}
+                disabled={isVerifying}
+              />
+              <small>Use this for a direct 1:1 face check when automatic matching finds multiple profiles.</small>
+            </label>
 
             <div className="stitch-progress-heading">
               <span>{flowLabel}</span>
