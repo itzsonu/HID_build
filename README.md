@@ -1,149 +1,246 @@
-# HID Face Liveness Detection & Authentication System
+# HID Face Liveness & Campus Access Prototype
 
-A hackathon prototype with separate face-detection, movement-based liveness, 1:1 identity-verification, and campus-schedule access-decision steps. It does not control a physical door.
+A local prototype for face enrollment, identity matching, movement challenges, and campus schedule checks. The backend calculates an access decision; **no physical door or lock is connected**.
 
-## Problem
+## What it does
 
-Face matching alone cannot establish that the camera is observing a physically present person: a printed photo, a screen replay, or other presentation attack may be presented to the camera. This prototype keeps liveness and identity as separate checks, then combines their server-calculated results with a configurable schedule.
+- Captures camera frames in the browser.
+- Enrolls a user from multiple reference photos, storing face templates rather than the original photos.
+- Supports automatic 1:N identity search and optional 1:1 verification using an enrolled user ID.
+- Issues a one-time `MOVE_LEFT` or `MOVE_RIGHT` challenge and checks face movement across frames.
+- Applies the configured campus schedule.
+- Returns an access decision and reason from the backend.
+- Provides authenticated enrollment management and a safe offline fallback that records a step-up event; offline mode does not grant access.
 
-## Current implementation status
+## Current security status
 
-The repository currently contains a FastAPI backend and a basic React demo:
+The included YuNet and SFace models are for face detection and face recognition. **They are not presentation-attack detection (PAD) models.** The current movement check does not prove that a person is live and cannot reliably detect printed photos, screen replays, video replays, or 3D masks.
 
-- FastAPI application initialization and environment-backed settings
-- Local-development CORS configuration
-- `GET /api/health`
-- `POST /api/face/detect` using OpenCV's built-in Haar Cascade as a lightweight baseline
-- `POST /api/liveness/challenge` and `POST /api/liveness/check` using a basic randomized movement heuristic
-- `POST /api/auth/register` and `POST /api/auth/verify` using OpenCV Zoo YuNet and SFace models with local SQLite embedding storage
-- `POST /api/auth/register/batch` for consent- and admin-authenticated enrollment, storing one normalized 128-dimensional template per accepted distinct photo
-- Authenticated `GET` and `DELETE /api/admin/enrollments` for user IDs and template counts; embeddings are never exposed
-- `POST /api/access/decision` combining a consumed liveness challenge, SFace identity comparison, and campus schedule
-- Pytest coverage for health, face detection, challenge expiry/reuse, and movement outcomes
-- A React enrollment panel and camera-preview screen; access attempts automatically search enrolled templates and capture 10 ordered JPEG frames
+Until a suitable PAD model is integrated and evaluated, uncertain liveness must remain `STEP_UP_VERIFICATION`. Do not change the movement threshold or label movement as `LIVE` just to obtain `ALLOW`. A previous video-replay attempt returned `ALLOW`; that result demonstrates why movement alone is not sufficient.
 
-The liveness result is an experimental movement heuristic, not reliable spoof detection. It does not reliably detect printed photos, screen replay, prerecorded video, or 3D masks; replayed movement may pass. No tested presentation-attack detection model is configured, so the backend fails closed to step-up or deny and cannot return `ALLOW`. SFace matching is an uncalibrated prototype, not production-grade identity security. The access endpoint is a demonstration policy, not campus-approved policy or a physical unlock. The included hours are examples, not verified PES University timings. No individual student/staff permissions are implemented. The frontend can enroll a consenting user from multiple reference photos and the backend automatically searches stored templates during a live challenge; it never calculates identity or access decisions in the browser.
+PAD performance is not measured for this repository. No detection rate, false-accept rate, or false-reject rate should be claimed for any spoof type unless it has been tested using documented samples and conditions.
 
 ## Technology stack
 
-- **Backend:** Python, FastAPI, Uvicorn, Pydantic, pytest
-- **Frontend:** React, TypeScript, and Vite
-- **Computer vision:** OpenCV headless Haar Cascade for baseline detection, plus OpenCV Zoo YuNet and SFace ONNX models for face alignment and embedding comparison
-- **Database:** local SQLite stores normalized face embeddings only; source images are not stored
-- **Schedule:** editable JSON configuration with IANA timezone evaluation
-- **Deployment (future):** AWS is outside the current implementation
+- **Frontend:** React, TypeScript, Vite
+- **Backend:** Python, FastAPI
+- **Computer vision:** OpenCV, YuNet face detection, SFace face embeddings
+- **Local storage:** SQLite for face templates and offline decision events
+- **Schedule:** JSON configuration with an explicit timezone
 
-## Project structure
+## Repository layout
 
 ```text
-hid-liveness-system/
-├── backend/
-│   ├── app/
-│   │   ├── api/routes/       # Health, face detection, liveness, and face-auth routes
-│   │   ├── core/             # Application settings
-│   │   ├── schemas/          # API request/response models
-│   │   ├── services/         # Detection, liveness, SFace, and SQLite services
-│   │   └── main.py           # FastAPI app, middleware, and route registration
-│   ├── models/               # Local OpenCV Zoo ONNX weights and license notices
-│   ├── config/               # Demonstration campus access schedule
-│   ├── tests/                # Backend unit, integration, and model smoke tests
-│   └── requirements.txt
-├── docs/
-│   ├── ARCHITECTURE.md       # Current and planned system responsibilities
-│   └── API_CONTRACT.md       # Implemented routes and remaining planned API
-├── frontend/                 # Consent-based enrollment and camera challenge demo
-└── README.md
+backend/
+  app/
+    api/routes/       FastAPI routes for access, enrollment, admin, and liveness
+    schemas/          Request and response models
+    services/         Face matching, movement analysis, schedule, storage
+  config/
+    campus_schedule.json
+  data/               Local SQLite databases (not for Git)
+  models/             YuNet and SFace model files and licenses
+  tests/
+frontend/
+  src/
+    App.tsx
+    components/BatchEnrollment.tsx
+    services/api.ts
+    frameCapture.ts
+    challengeDisplay.ts
+    stitch.css
+docs/
+  API_CONTRACT.md
+  ARCHITECTURE.md
 ```
 
-## Backend setup (Windows PowerShell)
+## Requirements
 
-Python 3.14.7 was used to validate the current backend. From the project root:
+- Windows, macOS, or Linux
+- Python version supported by `backend/requirements.txt`
+- Node.js and npm
+- A webcam or a camera exposed to the browser
+- A modern browser with camera permission enabled
+
+On a phone, camera access normally requires HTTPS. `localhost` is suitable for local development on the same computer. A phone opening the development server through a computer’s network address may need HTTPS.
+
+## Run locally on Windows
+
+Open two terminals in VS Code.
+
+### 1. Configure and start the backend
 
 ```powershell
-Set-Location .\backend
-.\.venv\Scripts\Activate.ps1
-```
+cd "C:\Users\SONU\Downloads\HID\hid-liveness-system\backend"
 
-If the existing environment is not present, create a virtual environment and install the pinned dependencies:
-
-```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Run backend tests:
+Set the admin secret for this terminal session. Replace the example with a long random value and do not commit it:
 
 ```powershell
-python -m pytest -q
+$env:ADMIN_SECRET = "replace-with-a-long-random-secret"
 ```
 
-Configure the required admin secret in the same PowerShell session before running the API. Generate a high-entropy secret, keep it out of source control, and enter the same value in the frontend's **ADMIN SECRET** field:
+Optional environment variables:
 
 ```powershell
-$env:ADMIN_SECRET = (python -c "import secrets; print(secrets.token_urlsafe(32))")
-Write-Output $env:ADMIN_SECRET
+$env:FACE_MATCH_THRESHOLD = "0.363"
+$env:ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 ```
 
-Copy the printed value into the frontend's **ADMIN SECRET** field. Keep it private and out of source control. `ADMIN_SECRET` has no insecure default; without it, enrollment and admin list/delete operations return `503`.
-
-Start the API:
+Start FastAPI:
 
 ```powershell
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The health endpoint is at [http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health). Interactive Swagger documentation is at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs). Stop Uvicorn with `Ctrl+C`.
+The API health check is available at:
 
-The default local CORS origins include Vite's `localhost` and `127.0.0.1` on ports 5173 and 5174, covering Vite's first automatic fallback when 5173 is occupied. Configure `ALLOWED_ORIGINS` as a comma-separated environment variable if the frontend uses a different local origin.
+```text
+http://127.0.0.1:8000/api/health
+```
 
-To manually test face detection with a laptop webcam still or a separately captured mobile JPEG, follow the temporary-file procedure in the [API contract](docs/API_CONTRACT.md#manual-real-image-testing). No camera capture is automated, and the repository contains no real-face test image.
+The interactive API documentation is available at:
 
-For liveness, first call `POST /api/liveness/challenge`, then submit 5–20 ordered JPEG Base64 strings from the same capture session to `POST /api/liveness/check` before the 60-second expiry. Challenge storage is process-local and temporary; do not rely on it with multiple workers or as a production security boundary.
+```text
+http://127.0.0.1:8000/docs
+```
 
-For local batch enrollment, use the frontend's **Reference enrollment** section with the configured admin secret, an authorized user ID, and at least two clear, distinct photos from a consenting person. Confirm consent before submitting. The browser accepts JPEG, PNG, and WebP files up to 5 MiB each, converts them to JPEG, and sends them only to the configured backend. The backend requires exactly one face per accepted image, applies basic image-quality checks, deduplicates exact and near-duplicate photos, and stores one normalized embedding per distinct accepted photo. It does not store the original photos. Submitted browser image data is cleared when each request completes. Enrollment success is shown only when the backend reports `registered: true`. The admin panel can list enrolled user IDs and template counts or delete a user's templates. These routes require `Authorization: Bearer <ADMIN_SECRET>`; embeddings are not returned. Swagger requests must include this header. The existing single-image `POST /api/auth/register` route is also admin-protected; `POST /api/auth/verify` remains a 1:1 identity-only comparison, not an access decision.
+### 2. Start the frontend
 
-For access verification, the visitor does not need to type a user ID. The camera demo submits only the ordered frames and challenge ID to `POST /api/access/decision`; the backend compares the selected live frame with precomputed per-photo templates. A unique threshold-qualified match returns the backend-provided user ID, multiple plausible matches request step-up, and no match is denied. The backend—not the browser—calculates liveness, identity, schedule status, and one decision. A tested presentation-attack detection model is not available, so even `LIVE` + `VERIFIED` + `WITHIN_SCHEDULE` cannot return `ALLOW`; movement evidence is `UNCERTAIN` and fails closed to step-up. Step-up requests are not access grants. Enrollment photos alone cannot call the access endpoint or grant access.
-
-The enrollment panel also offers **Capture live photo**. If the access camera is already active, its stream is reused; otherwise the enrollment panel opens its own camera stream and stops only that stream when closed. Captured photos stay in browser memory and pass through the same JPEG preparation, size, count, consent, and backend validation rules as uploaded photos. Access capture can run while enrollment uploads; if capture finishes first, access submission waits for enrollment confirmation, and cancelling while waiting submits no decision. The result view shows the measured challenge-to-final-frame duration, browser API round-trip, and backend processing time separately. No consenting real-participant benchmark has been run on a named machine/network, so the 1.5-second post-capture API target is **not measured or confirmed**. Displayed timings are per-attempt measurements, not a performance guarantee.
-
-When the backend is unavailable, the frontend offers **Record offline step-up**. This local path never evaluates biometrics or grants access; it instructs the visitor to contact authorized campus staff for an in-person check. The browser queues at most 50 events for up to 24 hours, containing only a random event ID, UTC timestamp, fixed step-up decision, and backend-unavailable reason. It stores no user ID, face image, or embedding. Events sync automatically when the backend reconnects through `POST /api/access/offline-sync`; the backend accepts only step-up events, deduplicates them, and retains them for up to 7 days. This is an audit trail, not an offline authorization or a staff-authentication mechanism.
-
-The recognition models are checked into `backend/models/` with their license notices; no extra model download is needed at runtime. The default database is `backend/data/face_embeddings.sqlite3` (ignored by Git). The `face_templates` table stores normalized 128-dimensional float32 embeddings as 512-byte little-endian BLOBs, per user and per distinct accepted photo, plus a SHA-256 reference-photo digest. Original photos are not stored. `BIOMETRIC_DB_PATH` changes the database path and `FACE_MATCH_THRESHOLD` configures the cosine cutoff. The default cutoff `0.363` is an uncalibrated OpenCV Zoo demo threshold, not a probability or accuracy claim. Batch enrollment uses basic size, brightness, and blur checks; these are not calibrated quality or identity guarantees. On first open, existing `face_embeddings` rows are migrated without deleting them: each aggregate becomes one `face_templates` row with no photo hash. New batch enrollments replace that user's template set and keep the old table synchronized for legacy schema compatibility; current verification reads from `face_templates`.
-
-The demonstration access schedule is `backend/config/campus_schedule.json`; edit it to use campus-approved hours or set `CAMPUS_SCHEDULE_PATH` to another JSON file. It is read for each decision. The timezone defaults to `Asia/Kolkata`; the sample opening hours and holiday exceptions are not verified PES University policy. Missing or invalid schedule data cannot produce `ALLOW`. `tzdata` is included for IANA timezone support on Windows.
-
-## Frontend setup (Windows PowerShell)
-
-In a second terminal from the project root:
+In a second terminal:
 
 ```powershell
-Set-Location .\frontend
+cd "C:\Users\SONU\Downloads\HID\hid-liveness-system\frontend"
 npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The frontend checks `GET /api/health` and uses `http://127.0.0.1:8000` by default. To use another backend address, copy `.env.example` to `.env.local`, set `VITE_API_BASE_URL`, and ensure the backend `ALLOWED_ORIGINS` includes the frontend's origin.
+Open:
 
-The browser asks for camera permission only after **Start camera** is clicked. On phones, camera access requires HTTPS except when the page is opened on `localhost` on that same device. The front-camera preference is requested where available. Captured frames are kept in browser memory and submitted to the backend for the active check; the frontend does not save them to disk. Stop the camera when finished.
+```text
+http://127.0.0.1:5173
+```
 
-Frontend checks:
+The frontend uses `http://127.0.0.1:8000` as the default backend URL. To use another backend, configure `VITE_API_BASE_URL` before starting Vite.
+
+## Enrollment and identity verification
+
+1. Start the backend and frontend.
+2. Open the enrollment section.
+3. Enter a stable user ID, for example `sonu-demo`.
+4. Provide consent and enroll at least two usable reference photos.
+5. Keep all reference photos for one person under the same user ID.
+6. Start camera verification and follow the screen-side movement instruction.
+7. If automatic identification reports `AMBIGUOUS`, enter the intended enrolled user ID in the optional ID field and retry.
+
+The entered ID is only a claimed identity. The backend still compares the captured face with the templates for that user. A wrong ID or a non-matching face must not verify. Automatic 1:N matching does not guess between multiple matching profiles.
+
+Enrollment management requires the configured admin secret. The admin interface can list enrollment IDs and template counts or delete an enrollment. Deleting an enrollment is permanent for that local database; verify the ID before deleting it.
+
+## Campus schedule
+
+Edit `backend/config/campus_schedule.json` to configure the access window. The timezone is explicit; the example uses `Asia/Kolkata`.
+
+Example:
+
+```json
+{
+  "timezone": "Asia/Kolkata",
+  "weekly": {
+    "monday": { "open": "08:00", "close": "20:00" },
+    "tuesday": { "open": "08:00", "close": "20:00" },
+    "wednesday": { "open": "08:00", "close": "20:00" },
+    "thursday": { "open": "08:00", "close": "20:00" },
+    "friday": { "open": "08:00", "close": "20:00" },
+    "saturday": { "open": "09:00", "close": "16:00" },
+    "sunday": { "closed": true }
+  },
+  "exceptions": {}
+}
+```
+
+The closing time is exclusive. For example, `close: "16:00"` means an attempt at 16:00 is outside the window. Configure demo hours deliberately; do not bypass the schedule in code.
+
+## Decision meanings
+
+- **ALLOW:** The configured policy permits access. The current project does not have a tested PAD model, so do not treat a movement match as sufficient evidence to enable this outcome.
+- **STEP_UP_VERIFICATION:** Evidence is uncertain, multiple profiles match, schedule information is unavailable/outside the allowed time, or additional verification is required. This is not an access grant.
+- **DENY:** The identity does not match or the requested movement challenge failed. A failed movement challenge is not, by itself, proof that the person is a spoof.
+
+The current movement analyzer can report `UNCERTAIN` even when it observes the requested movement. This is intentional while no tested PAD model is configured.
+
+## API overview
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Backend health |
+| `POST` | `/api/liveness/challenge` | Create a one-time movement challenge |
+| `POST` | `/api/access/decision` | Evaluate frames, identity, schedule, and policy |
+| `POST` | `/api/auth/register` | Enroll a single reference image |
+| `POST` | `/api/auth/register/batch` | Enroll multiple reference images for one user |
+| `POST` | `/api/auth/verify` | Verify a face against a specified enrolled user |
+| `GET` | `/api/admin/enrollments` | List IDs and template counts; requires admin authentication |
+| `DELETE` | `/api/admin/enrollments` | Delete an enrollment; requires admin authentication |
+| `POST` | `/api/access/offline-sync` | Sync queued step-up events; does not grant access |
+
+For exact request fields and response shapes, see [`docs/API_CONTRACT.md`](docs/API_CONTRACT.md).
+
+## Data and privacy
+
+- Face enrollment stores embedding templates in a local SQLite database; it is not intended to store the uploaded reference photos.
+- The default face database is under `backend/data/face_embeddings.sqlite3`.
+- Offline events use a separate local SQLite database.
+- Do not commit `.env` files, SQLite databases, captured frames, enrollment photos, or admin secrets.
+- Admin credentials must remain on the backend and must not be embedded in frontend source code.
+- The project is a prototype, not a production access-control system.
+
+## Timing and evaluation
+
+The UI reports backend processing, browser API round-trip, and capture duration separately. These timings are different measurements:
+
+- **Backend processing:** time spent evaluating a submitted request.
+- **API round-trip:** browser send-to-response time.
+- **Capture duration:** challenge creation/countdown through the final captured frame.
+
+Some recorded examples had backend/API times below two seconds, while one capture took about 3.86 seconds. These are individual observations, not a performance guarantee or a controlled benchmark.
+
+For a spoof evaluation, record the camera/device, lighting, sample type, number of attempts, outcome, and decision time for each category:
+
+- Real face
+- Printed photo
+- Photo shown on a screen
+- Video replay
+- 3D or printed mask
+
+Do not report detection rates or false-accept/false-reject rates from one or two attempts. The mask and replay categories remain unvalidated until a suitable PAD model and representative test samples are used.
+
+## Focused verification
+
+Run the two relevant identity/access tests:
 
 ```powershell
-npm run test
+cd "C:\Users\SONU\Downloads\HID\hid-liveness-system\backend"
+.\.venv\Scripts\python.exe -m pytest `
+  tests/test_face_auth.py::test_claimed_identity_must_match_and_be_the_strongest_enrolled_profile `
+  tests/test_access_decision.py::test_uncertain_liveness_with_verified_identity_steps_up_and_reuses_last_valid_frame -q
+```
+
+Build the frontend:
+
+```powershell
+cd "C:\Users\SONU\Downloads\HID\hid-liveness-system\frontend"
 npm run build
 ```
 
-## Documentation
+## Known limitations
 
-- [System architecture](docs/ARCHITECTURE.md)
-- [Frontend/backend API contract](docs/API_CONTRACT.md)
-
-## Biometric data, consent, and limitations
-
-Enrollment requires explicit consent and the configured admin secret, detects one face per image, and stores only normalized SFace template vectors, user IDs, hashes, and timestamps. The original JPEG is not stored. Explicit API consent does not establish legal compliance or prove a user's identity. Embeddings are sensitive biometric data: this prototype's SQLite database is local and unencrypted. Authenticated admin list/delete endpoints are available, but retention policy and role-specific authorization are not implemented.
-
-Identity verification and liveness are independent. `VERIFIED` does not mean `LIVE`. This prototype has no individual student/staff role permissions, authenticated kiosk identity, or physical door-controller connection. A step-up result requests another approved verification method; it is not an access grant. Do not rely on this prototype for security-sensitive decisions or expose it to untrusted clients.
-#   H I D _ b u i l d  
- 
+- No tested PAD model is configured.
+- Printed-photo, screen-replay, video-replay, and mask detection performance has not been established.
+- Movement alone cannot establish liveness.
+- The system has no physical door control.
+- A `STEP_UP_VERIFICATION` result is not approval; use an authorized secondary process.
+- Results from a small number of manual attempts are not accuracy statistics.
